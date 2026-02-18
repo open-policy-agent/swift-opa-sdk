@@ -1,5 +1,4 @@
-//
-//  SwiftOPASDK.swift
-//  SwiftOPASDK - Main entrypoint to the library
+// Copyright 2026 The OPA Authors
+// SPDX-License-Identifier: Apache-2.0
 
 import Foundation
