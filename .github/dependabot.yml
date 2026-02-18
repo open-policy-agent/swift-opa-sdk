@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Bundles all Github Actions updates into one PR.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      dependencies:
+        patterns:
+          - "*"
