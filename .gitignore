@@ -1,0 +1,19 @@
+# Borrowed git ignore items from swift-opa:
+.DS_Store
+.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+.swiftpm
+.swiftpm/**
+*.xcworkspace/**
+Package.resolved
+.vscode
+/opa-capabilities.json
+
+
+## Obj-C/Swift specific
+*.hmap
