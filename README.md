@@ -9,7 +9,7 @@ Swift-OPA-SDK is a Swift package that extends [Swift OPA](https://github.com/ope
 **Package.swift**
 ```swift
 let package = Package(
-    // required minimum versions for using swift-opa
+    // required minimum versions for using swift-opa-sdk
     platforms: [
         .macOS(.v13),
         .iOS(.v16),
@@ -22,7 +22,7 @@ let package = Package(
     targets: [
         // or libraryTarget
         .executableTarget(name: "<target-name>", dependencies: [
-            .product(name:"SwiftOpaSdk", package: "swift-opa-sdk"),
+            .product(name:"SwiftOPASDK", package: "swift-opa-sdk"),
             // other dependencies
         ]),
         // other targets
