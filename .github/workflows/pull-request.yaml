@@ -43,10 +43,69 @@ jobs:
         run: |
           sudo xcode-select --switch "${DEVELOPER_DIR}/Contents/Developer"
           xcodebuild -version
-      - uses: swift-actions/setup-swift@v2
+      - name: Get latest Swiftly version
         if: runner.os == 'Linux'
-        with:
-          swift-version: ${{ matrix.swift }}
+        id: swiftly-version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST_VERSION=$(gh release view --repo swiftlang/swiftly --json tagName -q '.tagName')
+          echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "Latest Swiftly version: $LATEST_VERSION"
+      - name: Setup Swiftly (version ${{ steps.swiftly-version.outputs.version }}) manually, installing toolchain version ${{ matrix.swift }}
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail  # Exit on error, undefined vars, and pipe failures
+          VERSION=${{ steps.swiftly-version.outputs.version }}
+
+          # Setup paths
+          TMP_PATH="${RUNNER_TEMP}"
+
+          HOME_DIR="${SWIFTLY_HOME_DIR:-${TMP_PATH}/home}"
+          BIN_DIR="${SWIFTLY_BIN_DIR:-${TMP_PATH}/bin}"
+
+          echo "SWIFTLY_HOME_DIR=${HOME_DIR}" >> $GITHUB_ENV
+          echo "SWIFTLY_BIN_DIR=${BIN_DIR}" >> $GITHUB_ENV
+
+          echo "${BIN_DIR}" >> $GITHUB_PATH
+
+          echo "::debug::Using Swiftly home dir: ${HOME_DIR}"
+          echo "::debug::Using Swiftly bin dir: ${BIN_DIR}"
+
+          # Install prereqs:
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+          # We make no attempt to verify the swiftly tarball with
+          # GPG here, because the site hosting the pubkeys is known
+          # to block curl scraping when under load.
+          curl -O https://download.swift.org/swiftly/linux/swiftly-${VERSION}-$(uname -m).tar.gz
+          tar zxf swiftly-${VERSION}-$(uname -m).tar.gz
+
+          echo "Initializing Swiftly"
+          ./swiftly init --skip-install --quiet-shell-followup --assume-yes --no-modify-profile
+
+          # Install the intended toolchain version:
+          # Install Swift
+          POST_INSTALL_SCRIPT="${TMP_PATH}/post-install.sh"
+
+          echo "Installing Swift ${SWIFT_VERSION}"
+          swiftly install --use "${SWIFT_VERSION}" --assume-yes --post-install-file "${POST_INSTALL_SCRIPT}"
+
+          # Run post-install script if it exists
+          if [ -f "${POST_INSTALL_SCRIPT}" ]; then
+            echo "Running post-install script"
+            bash "${POST_INSTALL_SCRIPT}"
+          fi
+
+          # Get Swift location and add to PATH
+          LOCATION=$(swiftly use --print-location)
+          echo "::debug::Swiftly installed Swift to ${LOCATION}"
+
+          swiftly link
+
+          echo "${LOCATION}" >> $GITHUB_PATH
+
       - name: Show Swift version
         run: swift --version
       - name: Fail if Swift version does not match expected version (${{ matrix.swift }})
