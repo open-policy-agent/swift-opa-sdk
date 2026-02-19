@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   ci:
     name: Build Swift ${{ matrix.swift }}${{ matrix.xcode && format(', Xcode {0}', matrix.xcode) || '' }} (${{ matrix.os }})
@@ -38,15 +41,19 @@ jobs:
       DEVELOPER_DIR: "/Applications/Xcode_${{ matrix.xcode }}.app"
       SWIFT_VERSION: ${{ matrix.swift }}
     steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
       - name: Select Xcode version
         if: runner.os == 'macOS'
         run: |
           sudo xcode-select --switch "${DEVELOPER_DIR}/Contents/Developer"
           xcodebuild -version
-      - uses: swift-actions/setup-swift@v2
+      - name: Setup Swiftly, installing toolchain version ${{ matrix.swift }}
         if: runner.os == 'Linux'
-        with:
-          swift-version: ${{ matrix.swift }}
+        run: |
+          echo "${{ matrix.swift }}" >> .swift-version
+          ./tools/build/setup-swiftly.sh --install-swiftly
       - name: Show Swift version
         run: swift --version
       - name: Fail if Swift version does not match expected version (${{ matrix.swift }})
@@ -60,7 +67,6 @@ jobs:
             echo "**Version Mismatch**: Expected \`${SWIFT_VERSION}\`, got \`${ACTUAL}\`" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - name: Install jemalloc
         if: runner.os == 'macOS'
         run: brew install jemalloc
