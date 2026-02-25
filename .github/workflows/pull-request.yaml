@@ -43,7 +43,7 @@ jobs:
         run: |
           sudo xcode-select --switch "${DEVELOPER_DIR}/Contents/Developer"
           xcodebuild -version
-      - uses: swift-actions/setup-swift@v2
+      - uses: swift-actions/setup-swift@v3
         if: runner.os == 'Linux'
         with:
           swift-version: ${{ matrix.swift }}
@@ -60,7 +60,7 @@ jobs:
             echo "**Version Mismatch**: Expected \`${SWIFT_VERSION}\`, got \`${ACTUAL}\`" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install jemalloc
         if: runner.os == 'macOS'
         run: brew install jemalloc
