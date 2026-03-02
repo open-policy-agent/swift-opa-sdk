@@ -21,7 +21,7 @@ jobs:
     permissions:
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6.0.2
         with:
           ref: ${{ github.base_ref }}  # Use scripts only from trusted base branch
           fetch-depth: 0  # Fetch full history to access all commits
