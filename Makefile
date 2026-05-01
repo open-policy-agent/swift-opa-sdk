@@ -15,7 +15,13 @@ lint:
 .PHONY: test
 test:
 	mkdir -p .build/test-results
-	swift test --xunit-output .build/test-results/junit.xml
+	@if command -v openssl >/dev/null 2>&1; then \
+		echo "openssl detected on PATH; enabling OpenSSL-dependent tests"; \
+		SWIFT_OPA_OPENSSL_TESTS=1 swift test --xunit-output .build/test-results/junit.xml; \
+	else \
+		echo "openssl NOT found on PATH; OpenSSL-dependent tests will be skipped"; \
+		swift test --xunit-output .build/test-results/junit.xml; \
+	fi
 
 .PHONY: test-compliance
 test-compliance:

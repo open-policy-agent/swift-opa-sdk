@@ -79,7 +79,7 @@ struct RESTClientLongPollingStateTransitionTests {
             server.state.responseContentType = "application/gzip"
             server.state.etag = "\"lp-v2\""
 
-            // Load 3: gets 200 with regular content-type → disables long-polling.
+            // Load 3: gets 200 with regular content-type -> disables long-polling.
             _ = await loader.load()
 
             // Load 4: long-polling should now be OFF.
@@ -112,7 +112,7 @@ struct RESTClientLongPollingStateTransitionTests {
             server.state.responseContentType = Self.opaBundleContentType
             server.state.etag = "\"v2\""
 
-            // Load 3: picks up OPA content-type → enables long-polling.
+            // Load 3: picks up OPA content-type -> enables long-polling.
             _ = await loader.load()
 
             // Load 4: should now include wait=.
@@ -165,7 +165,7 @@ struct RESTClientLongPollingStateTransitionTests {
 struct PreferHeaderExpectation: Sendable {
     /// Whether `wait=` should appear in the prefer header.
     let shouldContainWait: Bool
-    /// If `shouldContainWait`, the exact value expected (e.g. 30 → "wait=30").
+    /// If `shouldContainWait`, the exact value expected (e.g. 30 -> "wait=30").
     let expectedWaitValue: Int?
 
     static func wait(_ value: Int) -> Self {
@@ -181,7 +181,7 @@ struct RESTClientLongPollingPreferHeaderTests {
     struct PreferHeaderTestCase: Sendable, CustomStringConvertible {
         let name: String
         let serverContentType: String
-        let longPollingTimeout: Int?  // nil → use polling config (no LP)
+        let longPollingTimeout: Int?  // nil -> use polling config (no LP)
         /// One entry per load. Loads after the first are forced to 304.
         let expectations: [PreferHeaderExpectation]
 
@@ -273,10 +273,10 @@ func makeBundleData() throws -> Data {
 func withBundleServer(
     etag: String = "\"v1\"",
     contentType: String = "application/gzip",
-    _ body: (ETagBundleServer) async throws -> Void
+    _ body: (TestBundleServer) async throws -> Void
 ) async throws {
     let bundleData = try makeBundleData()
-    let server = try await ETagBundleServer.start(
+    let server = try await TestBundleServer.start(
         bundleData: bundleData, etag: etag, contentType: contentType
     )
     do {
@@ -288,10 +288,8 @@ func withBundleServer(
     }
 }
 
-/// Boots a Runtime against the given server, waits for initial bundle load,
-/// and passes the running runtime to the body. Cancels the background task on exit.
 func withRunningRuntime(
-    server: ETagBundleServer,
+    server: TestBundleServer,
     configJSON: String,
     bundleName: String = "test",
     _ body: (OPA.Runtime) async throws -> Void

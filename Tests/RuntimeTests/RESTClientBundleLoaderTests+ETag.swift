@@ -3,25 +3,6 @@ import Foundation
 import Rego
 import Testing
 
-// MARK: - Helpers
-
-/// Unwrap a successful bundle result or fail the test.
-private func requireSuccess(
-    _ result: Result<OPA.Bundle, Error>,
-    context: String = ""
-) throws -> OPA.Bundle {
-    guard case .success(let bundle) = result else {
-        let msg = "Expected .success\(context.isEmpty ? "" : " \(context)"), got \(result)"
-        Issue.record(Comment(rawValue: msg))
-        throw BundleResultError.unexpectedFailure(message: msg)
-    }
-    return bundle
-}
-
-private enum BundleResultError: Error {
-    case unexpectedFailure(message: String)
-}
-
 // MARK: - Loader-Level ETag Tests
 
 @Suite("RESTClientBundleLoader ETag Tests")
@@ -33,7 +14,7 @@ struct RESTClientETagTests {
     func testFirstRequestHasNoIfNoneMatch() async throws {
         try await withBundleServer(etag: "\"v1\"") { server in
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
-            let _ = try requireSuccess(await loader.load())
+            let _ = try requireBundleLoadSuccess(await loader.load())
 
             let requests = server.state.requests
             #expect(requests.count == 1)
@@ -74,9 +55,9 @@ struct RESTClientETagTests {
         try await withBundleServer(etag: "\"rev-1\"") { server in
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
-            let firstBundle = try requireSuccess(await loader.load(), context: "on first load")
+            let firstBundle = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
             server.state.forceStatusCode = 304
-            let secondBundle = try requireSuccess(await loader.load(), context: "on second (304) load")
+            let secondBundle = try requireBundleLoadSuccess(await loader.load(), context: "on second (304) load")
             server.state.forceStatusCode = nil
 
             #expect(firstBundle == secondBundle)
@@ -88,14 +69,14 @@ struct RESTClientETagTests {
         try await withBundleServer(etag: "\"v1\"") { server in
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
-            let loadedA = try requireSuccess(await loader.load(), context: "on first load")
+            let loadedA = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
             #expect(loader.etag == "\"v1\"")
 
             // Swap to a new bundle with a new etag on the server.
             server.state.bundleData = try makeBundleData()
             server.state.etag = "\"v2\""
 
-            let loadedB = try requireSuccess(await loader.load(), context: "on second load")
+            let loadedB = try requireBundleLoadSuccess(await loader.load(), context: "on second load")
             #expect(loader.etag == "\"v2\"")
             #expect(loadedA != loadedB)
         }
@@ -111,7 +92,7 @@ struct RESTClientETagTests {
 
             server.state.etag = nil
 
-            let _ = try requireSuccess(await loader.load(), context: "on second load")
+            let _ = try requireBundleLoadSuccess(await loader.load(), context: "on second load")
             #expect(loader.etag == "")
         }
     }
@@ -132,10 +113,10 @@ struct RESTClientETagTests {
         try await withBundleServer(etag: "\"stable\"") { server in
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
-            let originalBundle = try requireSuccess(await loader.load(), context: "on first load")
+            let originalBundle = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
             server.state.forceStatusCode = 304
             for i in 1...3 {
-                let cachedBundle = try requireSuccess(await loader.load(), context: "on 304 round \(i)")
+                let cachedBundle = try requireBundleLoadSuccess(await loader.load(), context: "on 304 round \(i)")
                 #expect(cachedBundle == originalBundle, "Round \(i): cached bundle should match original")
             }
         }
@@ -145,7 +126,7 @@ struct RESTClientETagTests {
 
     @Test("304 without a previously cached bundle produces a failure")
     func test304WithoutCachedBundleFails() async throws {
-        let server = try await ETagBundleServer.start(
+        let server = try await TestBundleServer.start(
             bundleData: Data(), etag: "\"orphan\"", forceStatusCode: 304
         )
         defer { Task { try? await server.shutdown() } }
@@ -198,7 +179,7 @@ struct RESTClientETagTests {
             }
 
             server.state.forceStatusCode = nil
-            let _ = try requireSuccess(await loader.load(), context: "after server recovery")
+            let _ = try requireBundleLoadSuccess(await loader.load(), context: "after server recovery")
             #expect(loader.etag == "\"v1\"")
         }
     }

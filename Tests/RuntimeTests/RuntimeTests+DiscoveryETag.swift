@@ -84,7 +84,7 @@ struct RuntimeDiscoveryETagTests {
 
     @Test("Discovery succeeds, but one regular bundle endpoint 404s")
     func discoveryPartialBundleFailure() async throws {
-        // 'bad' is listed in the discovered config but not registered → 404.
+        // 'bad' is listed in the discovered config but not registered -> 404.
         let (server, runtime, runTask) = try await startDiscoveryRuntime(
             discovery: DiscoverySpec(discoveredBundles: ["good", "bad"]),
             bundles: [BundleSpec(name: "good")]
@@ -217,13 +217,13 @@ struct RuntimeDiscoveryLongPollingStateTransitionTests {
 
         static let all: [TransitionCase] = [
             TransitionCase(
-                name: "server stops signaling → LP disabled",
+                name: "server stops signaling -> LP disabled",
                 initialContentType: opaCT, switchedContentType: gzipCT,
                 lpTimeout: 30,
                 initiallyLongPolling: true, finallyLongPolling: false
             ),
             TransitionCase(
-                name: "server starts signaling → LP enabled",
+                name: "server starts signaling -> LP enabled",
                 initialContentType: gzipCT, switchedContentType: opaCT,
                 lpTimeout: 20,
                 initiallyLongPolling: false, finallyLongPolling: true
@@ -357,7 +357,7 @@ func startDiscoveryRuntime(
     discovery: DiscoverySpec,
     bundles: [BundleSpec] = [],
     polling: PollingOptions = PollingOptions()
-) async throws -> (server: ETagBundleServer, runtime: OPA.Runtime, runTask: Task<Void, Error>) {
+) async throws -> (server: TestBundleServer, runtime: OPA.Runtime, runTask: Task<Void, Error>) {
     // Register bundle endpoints.
     var paths: [String: PathState] = [:]
     for b in bundles {
@@ -377,7 +377,7 @@ func startDiscoveryRuntime(
         longPollDelay: discovery.longPollDelay
     )
 
-    let server = try await ETagBundleServer.start(paths: paths)
+    let server = try await TestBundleServer.start(paths: paths)
 
     // If discovery is expected to succeed, install the real tarball.
     if discovery.forceStatusCode == nil && !discovery.discoveredBundles.isEmpty {
@@ -458,7 +458,7 @@ func waitForBundleCount(
 }
 
 func waitForRequests(
-    _ server: ETagBundleServer, prefix: String, atLeast n: Int,
+    _ server: TestBundleServer, prefix: String, atLeast n: Int,
     timeout: Duration = .seconds(15)
 ) async throws {
     try await waitForCondition("\(prefix) requests >= \(n)", timeout: timeout) {
