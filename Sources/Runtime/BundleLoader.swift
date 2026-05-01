@@ -37,8 +37,11 @@ extension OPA {
     public protocol HTTPBundleLoader: BundleLoader {
         /// Needs a public constructor that can build from the config directly.
         init(
-            config: OPA.Config, bundleResourceName: String, etag: String?, headers: [String: String]?,
-            httpClient: HTTPClient?) throws
+            config: OPA.Config,
+            bundleResourceName: String,
+            etag: String?,
+            headers: [String: String]?,
+            httpClientConfig: HTTPClient.Configuration?) throws
 
         /// Constructor for loading a discovery bundle over HTTP.
         ///
@@ -46,8 +49,10 @@ extension OPA {
         /// rather than `config.bundles`. Loaders that don't support discovery
         /// inherit a default implementation that throws.
         init(
-            discoveryConfig: OPA.Config, etag: String?, headers: [String: String]?,
-            httpClient: HTTPClient?) throws
+            discoveryConfig: OPA.Config,
+            etag: String?,
+            headers: [String: String]?,
+            httpClientConfig: HTTPClient.Configuration?) throws
 
         /// Used by the loader-managing task to determine whether to sleep or not between polls.
         func isLongPollingEnabled() -> Bool
@@ -72,8 +77,10 @@ extension OPA.BundleLoader {
 extension OPA.HTTPBundleLoader {
     /// Default: loader throws at init time.
     public init(
-        discoveryConfig: OPA.Config, etag: String?, headers: [String: String]?,
-        httpClient: HTTPClient?
+        discoveryConfig: OPA.Config,
+        etag: String?,
+        headers: [String: String]?,
+        httpClientConfig: HTTPClient.Configuration?
     ) throws {
         throw RuntimeError(code: .discoveryNotSupported, message: "Bundle loader does not support Discovery")
     }

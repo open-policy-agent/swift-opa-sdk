@@ -83,8 +83,8 @@ extension OPA {
         /// conflicting header values will be overwritten.
         public let customHeaders: [String: String]
 
-        /// HTTPClient instance to use for requests.
-        public var httpClient: HTTPClient
+        /// HTTPClient configuration to use when polling.
+        public private(set) var httpClientConfig: HTTPClient.Configuration
 
         /// Polling configuration.
         public let polling: PollingConfig?
@@ -104,8 +104,11 @@ extension OPA {
         }
 
         public init(
-            config: Rego.OPA.Config, bundleResourceName: String, etag: String? = nil, headers: [String: String]? = nil,
-            httpClient: AsyncHTTPClient.HTTPClient? = nil
+            config: Rego.OPA.Config,
+            bundleResourceName: String,
+            etag: String? = nil,
+            headers: [String: String]? = nil,
+            httpClientConfig: HTTPClient.Configuration? = nil
         ) throws {
             guard let resource = config.bundles[bundleResourceName] else {
                 throw RuntimeError(
@@ -137,7 +140,8 @@ extension OPA {
             self.serviceConfig = service
             self.bundleConfig = resource
             self.customHeaders = headers ?? [:]
-            self.httpClient = httpClient ?? HTTPClient.shared
+            let httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
+            self.httpClientConfig = httpClientConfig
             self.polling = resource.downloaderConfig.polling
             self.lastBundle = nil
             self.longPollingEnabled = false
@@ -154,7 +158,7 @@ extension OPA {
             discoveryConfig config: OPA.Config,
             etag: String? = nil,
             headers: [String: String]? = nil,
-            httpClient: HTTPClient? = nil
+            httpClientConfig: HTTPClient.Configuration? = nil
         ) throws {
             guard let discovery = config.discovery else {
                 throw RuntimeError(
@@ -189,7 +193,8 @@ extension OPA {
                 signing: discovery.signing
             )
             self.customHeaders = headers ?? [:]
-            self.httpClient = httpClient ?? HTTPClient.shared
+            let httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
+            self.httpClientConfig = httpClientConfig
             self.polling = discovery.downloaderConfig.polling
             self.lastBundle = nil
             self.longPollingEnabled = false
@@ -197,7 +202,7 @@ extension OPA {
 
         /// Compatibility check against the OPA bundle config section.
         /// If the resource is of a supported credential type, this check returns `true`.
-        /// Currently, supported credential types are: (default no auth), Bearer auth.
+        /// Currently, supported credential types are: (default no auth), Bearer auth, Client TLS auth.
         public static func compatibleWithConfig(config: Config, bundleResourceName: String) -> Bool {
             guard let resource = config.bundles[bundleResourceName] else {
                 return false
@@ -267,8 +272,20 @@ extension OPA {
                 } catch {
                     return .failure(error)
                 }
-            // case .clientTLS(let plugin):
-            //     break
+            case .clientTLS(let pluginConfig):
+                let loader = OPA.ClientTLSAuthPluginLoader(config: pluginConfig)
+                do {
+                    // prepare is a no-op for clientTLS, but keep the pattern symmetric.
+                    try loader.prepare(req: &httpRequest)
+                    // If the caller didn't pre-build an mTLS-aware httpClientConfig,
+                    // build one here, mutating self.httpClientConfig if needed.
+                    self.httpClientConfig = try loader.newHTTPClientConfig(
+                        service: self.serviceConfig,
+                        base: self.httpClientConfig
+                    )
+                } catch {
+                    return .failure(error)
+                }
             default:
                 return .failure(
                     RuntimeError(
@@ -298,55 +315,62 @@ extension OPA {
                     longPollingTA = longPollTimeout
                 }
 
-                let response =
-                    if longPollingTA > 0 {
-                        try await self.httpClient.execute(httpRequest, timeout: .seconds(longPollingTA))
-                    } else {
-                        try await self.httpClient.execute(httpRequest, deadline: NIODeadline.distantFuture)
-                    }
+                // Create a one-off HTTPClient, and shut it down when we're done.
+                return try await HTTPClient.withHTTPClient(
+                    eventLoopGroup: .singletonMultiThreadedEventLoopGroup,
+                    configuration: self.httpClientConfig,
+                    backgroundActivityLogger: nil,
+                    { httpClient in
+                        let response =
+                            if longPollingTA > 0 {
+                                try await httpClient.execute(httpRequest, timeout: .seconds(longPollingTA))
+                            } else {
+                                try await httpClient.execute(httpRequest, deadline: NIODeadline.distantFuture)
+                            }
+                        // Future: Add logger warning if Content-Type header values are off. (Validation done by OPA)
 
-                // Future: Add logger warning if Content-Type header values are off. (Validation done by OPA)
+                        // Collect the full response body into a ByteBuffer.
+                        let maxBytesLimit = 50 * 1024 * 1024  // 50 MB
+                        let body = try await response.body.collect(upTo: maxBytesLimit)
 
-                // Collect the full response body into a ByteBuffer.
-                let maxBytesLimit = 50 * 1024 * 1024  // 50 MB
-                let body = try await response.body.collect(upTo: maxBytesLimit)
+                        if response.status.code == 304 {
+                            guard let bundle = self.lastBundle else {
+                                return Result<OPA.Bundle, Error>.failure(
+                                    RuntimeError(
+                                        code: .internalError,
+                                        message:
+                                            "Bundle download failed. Server returned response code 304 Not Modified, but no prior bundle cached."
+                                    ))
+                            }
+                            return .success(bundle)
+                            // Otherwise, fall through to error handler.
+                        }
 
-                if response.status.code == 304 {
-                    guard let bundle = self.lastBundle else {
-                        return .failure(
-                            RuntimeError(
+                        guard (200..<300).contains(response.status.code) else {
+                            throw RuntimeError(
                                 code: .internalError,
-                                message:
-                                    "Bundle download failed. Server returned response code 304 Not Modified, but no prior bundle cached."
-                            ))
-                    }
-                    return .success(bundle)
-                    // Otherwise, fall through to error handler.
-                }
+                                message: "Bundle download failed with response code: \(response.status.code)")
+                        }
 
-                guard (200..<300).contains(response.status.code) else {
-                    throw RuntimeError(
-                        code: .internalError,
-                        message: "Bundle download failed with response code: \(response.status.code)")
-                }
+                        // Convert ByteBuffer to Data.
+                        let data = Data(body.readableBytesView)
 
-                // Convert ByteBuffer to Data.
-                let data = Data(body.readableBytesView)
+                        // Decode the tarball into an OPA.Bundle.
+                        let newBundle = try OPA.Bundle.decodeFromTarball(from: data)
 
-                // Decode the tarball into an OPA.Bundle.
-                let newBundle = try OPA.Bundle.decodeFromTarball(from: data)
-
-                // Cache last bundle, so we can handle the "no changes case".
-                self.lastBundle = newBundle
-                self.etag = response.headers["etag"].first ?? ""
-                self.longPollingEnabled = isLongPollingSupported(headers: response.headers)
-                return .success(newBundle)
+                        // Cache last bundle, so we can handle the "no changes case".
+                        self.lastBundle = newBundle
+                        self.etag = response.headers["etag"].first ?? ""
+                        self.longPollingEnabled = isLongPollingSupported(headers: response.headers)
+                        return .success(newBundle)
+                    })
             } catch {
                 self.etag = ""
                 return .failure(error)
             }
         }
 
+        /// Utility function to see if the last response's headers indicate the server supports long-polling.
         private func isLongPollingSupported(headers: HTTPHeaders) -> Bool {
             return headers["content-type"].contains("application/vnd.openpolicyagent.bundles")
         }

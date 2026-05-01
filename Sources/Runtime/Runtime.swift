@@ -60,10 +60,8 @@ extension OPA {
         /// during query preparation.
         public nonisolated let customBuiltins: [String: Rego.Builtin]
 
-        /// HTTP client for network operations (bundle downloads, etc.).
-        /// Declared `nonisolated` because `HTTPClient` is `Sendable` and
-        /// this allows off-actor bundle fetching without an actor hop.
-        public nonisolated let httpClient: HTTPClient?
+        /// HTTP client configuration to use in off-actor bundle loaders.
+        public nonisolated let httpClientConfig: HTTPClient.Configuration?
 
         /// Bundle loader type list to use for loading bundles. Ordered by priority.
         private nonisolated let bundleLoaders: [BundleLoader.Type]
@@ -121,7 +119,7 @@ extension OPA {
         ///   - config: The boot configuration.
         ///   - queries: Initial set of queries to prepare after bundles are loaded.
         ///   - instanceID: An identifier for this Runtime instance.
-        ///   - httpClient: The HTTP client to use for network operations.
+        ///   - httpClientConfig: The HTTP client configuration to use for bundle loaders.
         ///   - bundleLoaders: BundleLoader types to use, in priority order.
         ///   - configProvider: An optional config provider. If nil and `config.discovery`
         ///     is set, a ``DiscoveryConfigProvider`` is created automatically.
@@ -131,7 +129,7 @@ extension OPA {
             config: OPA.Config,
             queries: [String]? = nil,
             instanceID: String = UUID().uuidString,
-            httpClient: HTTPClient? = nil,
+            httpClientConfig: HTTPClient.Configuration? = nil,
             bundleLoaders: [BundleLoader.Type] = [
                 OPA.DiskBasedBundleLoader.self,
                 OPA.RESTClientBundleLoader.self,
@@ -144,7 +142,7 @@ extension OPA {
             self.instanceID = instanceID
             self.customBuiltins = SDKBuiltinFuncs.sdkDefaultBuiltins.merging(
                 customBuiltins, uniquingKeysWith: { (_, new) in new })
-            self.httpClient = httpClient ?? HTTPClient.shared
+            self.httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
             self.bundleLoaders = bundleLoaders
             self.preparedQueries = [:]
             self.queries = Set(queries ?? [])

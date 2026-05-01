@@ -2,6 +2,7 @@ import AST
 import Foundation
 import Rego
 import Runtime
+import Testing
 
 public func makeTempDir() throws -> URL {
     let tempDir = FileManager.default.temporaryDirectory
@@ -68,21 +69,56 @@ public func makeExampleBundle(
     return try OPA.Bundle(manifest: manifest, planFiles: planFiles, regoFiles: regoFiles, data: data)
 }
 
-/// Polls until the named bundle appears in the runtime's storage, or the timeout expires.
+/// Polls until the named bundle appears in the runtime's storage and
+/// `predicate` returns `true`, or the timeout expires. When no predicate
+/// is provided, this degrades into an "is bundle loaded?" check.
 public func waitForBundleLoad(
     rt: OPA.Runtime,
     name: String,
     timeout: Duration = .seconds(30),
-    pollInterval: Duration = .milliseconds(100)
-) async -> Result<OPA.Bundle, any Swift.Error> {
+    pollInterval: Duration = .milliseconds(100),
+    where predicate: (@Sendable (Result<OPA.Bundle, any Swift.Error>) -> Bool)? = nil
+) async -> Result<OPA.Bundle, any Swift.Error>? {
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
-        if let result = await rt.bundleStorage[name] {
+        if let result = await rt.bundleStorage[name],
+            predicate?(result) ?? true
+        {
             return result
         }
         try? await Task.sleep(for: pollInterval)
     }
-    return .failure(CancellationError())
+    return nil
+}
+
+/// Unwrap a successful bundle result or fail the test.
+public func requireBundleLoadSuccess(
+    _ result: Result<OPA.Bundle, Error>,
+    context: String = ""
+) throws -> OPA.Bundle {
+    guard case .success(let bundle) = result else {
+        let msg = "Expected .success\(context.isEmpty ? "" : " \(context)"), got \(result)"
+        Issue.record(Comment(rawValue: msg))
+        throw BundleResultError.unexpectedFailure(message: msg)
+    }
+    return bundle
+}
+
+/// Unwrap a failure bundle result or fail the test.
+public func requireBundleLoadFailure(
+    _ result: Result<OPA.Bundle, Error>,
+    context: String = ""
+) throws -> Error {
+    guard case .failure(let error) = result else {
+        let msg = "Expected .failure\(context.isEmpty ? "" : " \(context)"), got \(result)"
+        Issue.record(Comment(rawValue: msg))
+        throw BundleResultError.unexpectedFailure(message: msg)
+    }
+    return error
+}
+
+public enum BundleResultError: Error {
+    case unexpectedFailure(message: String)
 }
 
 /// Build an OPA config JSON pointing at the given ETag test server.
@@ -168,6 +204,6 @@ public func makeRESTClientBundleLoader(
         bundleResourceName: bundleName,
         etag: etag,
         headers: nil,
-        httpClient: nil
+        httpClientConfig: nil
     )
 }

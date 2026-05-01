@@ -70,6 +70,13 @@ jobs:
       - name: Install jemalloc
         if: runner.os == 'macOS'
         run: brew install jemalloc
+      - name: Verify openssl available (for OpenSSL-dependent tests)
+        run: |
+          if ! command -v openssl >/dev/null 2>&1; then
+            echo "::error::openssl not found on PATH; OpenSSL-dependent tests would be skipped"
+            exit 1
+          fi
+          openssl version
       - name: Lint
         run: make lint
       - name: Test

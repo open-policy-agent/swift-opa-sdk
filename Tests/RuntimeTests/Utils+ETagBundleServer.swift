@@ -81,7 +81,7 @@ final class PathState: @unchecked Sendable {
 ///  - **Single-path**: one `PathState` stored under a sentinel wildcard key
 ///    and returned for every URI. This preserves the original
 ///    `ETagBundleServer` ergonomics (`server.state.bundleData`, etc.).
-final class ETagServerState: @unchecked Sendable {
+final class ServerState: @unchecked Sendable {
     /// Sentinel key used for single-path (wildcard) registration.
     fileprivate static let wildcardKey = "*"
 
@@ -174,14 +174,14 @@ final class ETagServerState: @unchecked Sendable {
 ///  - If the incoming `If-None-Match` header matches the current ETag, respond 304.
 ///  - Otherwise respond 200 with the current data and ETag.
 ///  - If `longPollDelay` is set, the response is scheduled after that delay.
-final class ETagBundleHandler: ChannelInboundHandler, @unchecked Sendable {
+final class TestBundleHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
-    let state: ETagServerState
+    let state: ServerState
     private var requestHead: HTTPRequestHead?
 
-    init(state: ETagServerState) {
+    init(state: ServerState) {
         self.state = state
     }
 
@@ -280,65 +280,5 @@ final class ETagBundleHandler: ChannelInboundHandler, @unchecked Sendable {
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
             context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
         }
-    }
-}
-
-// MARK: - Server
-
-/// A lightweight NIO-based HTTP test server supporting ETag / 304 semantics
-/// on one or many paths.
-struct ETagBundleServer: Sendable {
-    let channel: Channel
-    let group: EventLoopGroup
-    let state: ETagServerState
-
-    var port: Int { channel.localAddress!.port! }
-    var baseURL: String { "http://127.0.0.1:\(port)" }
-
-    /// Single-path convenience. Every request (regardless of URI) is served
-    /// from the same `PathState`, matching the original `ETagBundleServer`
-    /// behaviour.
-    static func start(
-        bundleData: Data,
-        etag: String?,
-        forceStatusCode: UInt? = nil,
-        contentType: String = "application/gzip"
-    ) async throws -> ETagBundleServer {
-        let pathState = PathState(
-            data: bundleData,
-            etag: etag,
-            forceStatusCode: forceStatusCode,
-            contentType: contentType
-        )
-        let state = ETagServerState(singlePath: pathState)
-        return try await start(state: state)
-    }
-
-    /// Multi-path entry point. Each URI in `paths` is served from its own
-    /// `PathState`; unregistered URIs yield 404.
-    static func start(paths: [String: PathState]) async throws -> ETagBundleServer {
-        let state = ETagServerState(paths: paths)
-        return try await start(state: state)
-    }
-
-    private static func start(state: ETagServerState) async throws -> ETagBundleServer {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-
-        let bootstrap = ServerBootstrap(group: group)
-            .serverChannelOption(.backlog, value: 256)
-            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(ETagBundleHandler(state: state))
-                }
-            }
-
-        let channel = try await bootstrap.bind(host: "127.0.0.1", port: 0).get()
-        return ETagBundleServer(channel: channel, group: group, state: state)
-    }
-
-    func shutdown() async throws {
-        try await channel.close()
-        try await group.shutdownGracefully()
     }
 }
