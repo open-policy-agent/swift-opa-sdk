@@ -5,6 +5,7 @@ import Runtime
 import Testing
 
 public func makeTempDir() throws -> URL {
+    TestLogging.ensureBootstrapped()
     let tempDir = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
@@ -30,6 +31,7 @@ public func makeExampleBundle(
     regoFiles: [BundleFile]? = nil,
     data: AST.RegoValue? = nil
 ) throws -> OPA.Bundle {
+    TestLogging.ensureBootstrapped()
     let id = UUID().uuidString
     let manifest = manifest ?? OPA.Manifest(revision: UUID().uuidString, roots: ["/\(id)"])
     let planFiles =
@@ -79,6 +81,7 @@ public func waitForBundleLoad(
     pollInterval: Duration = .milliseconds(100),
     where predicate: (@Sendable (Result<OPA.Bundle, any Swift.Error>) -> Bool)? = nil
 ) async -> Result<OPA.Bundle, any Swift.Error>? {
+    TestLogging.ensureBootstrapped()
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
         if let result = await rt.bundleStorage[name],
@@ -198,6 +201,7 @@ public func makeRESTClientBundleLoader(
     bundleName: String = "test",
     etag: String? = nil
 ) throws -> OPA.RESTClientBundleLoader {
+    TestLogging.ensureBootstrapped()
     let config = try JSONDecoder().decode(OPA.Config.self, from: configJSON.data(using: .utf8)!)
     return try OPA.RESTClientBundleLoader(
         config: config,

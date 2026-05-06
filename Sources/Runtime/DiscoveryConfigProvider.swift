@@ -2,6 +2,7 @@ import AST
 import AsyncHTTPClient
 import Config
 import Foundation
+import Logging
 import Rego
 
 extension OPA {
@@ -40,9 +41,11 @@ extension OPA {
         /// May mutate over time due to state caching in the loader.
         private var loader: any OPA.BundleLoader
 
+        private var logger: Logger
+
         /// Constructs a DiscoveryConfigProvider from the provided boot config.
-        public init(config: OPA.Config) throws {
-            try self.init(bootConfig: config)
+        public init(config: OPA.Config, logger: Logger? = nil) throws {
+            try self.init(bootConfig: config, logger: logger)
         }
 
         /// Constructs a DiscoveryConfigProvider from the provided boot config.
@@ -59,7 +62,8 @@ extension OPA {
             bundleLoaders: [OPA.BundleLoader.Type] = [
                 OPA.DiskBasedBundleLoader.self,
                 OPA.RESTClientBundleLoader.self,
-            ]
+            ],
+            logger: Logger? = nil
         ) throws {
             guard let discoveryConfig = bootConfig.discovery else {
                 throw RuntimeError(
@@ -75,7 +79,7 @@ extension OPA {
             var constructed: (any OPA.BundleLoader)?
             for loaderType in bundleLoaders {
                 if loaderType.compatibleWithDiscoveryConfig(config: bootConfig) {
-                    constructed = try loaderType.init(discoveryConfig: bootConfig)
+                    constructed = try loaderType.init(discoveryConfig: bootConfig, logger: logger)
                     break
                 }
             }
@@ -88,6 +92,7 @@ extension OPA {
             }
 
             self.loader = constructed
+            self.logger = logger ?? Logger(label: "swift-opa.config.discovery")
         }
 
         // MARK: - ConfigProvider

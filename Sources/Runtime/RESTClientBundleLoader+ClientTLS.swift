@@ -2,7 +2,7 @@ import AsyncHTTPClient
 import Config
 import Crypto
 import Foundation
-import NIOConcurrencyHelpers
+import NIOConcurrencyHelpers  // Needed for NIOLockedValueBox
 import NIOCore  // Needed for type TimeAmount
 import NIOHTTP1  // Needed for type HTTPHeaders
 import NIOSSL
@@ -13,13 +13,21 @@ extension OPA {
     public struct ClientTLSAuthPluginLoader: Sendable {
         public let config: ClientTLSAuthPlugin
 
-        /// Reference-typed cache so this struct stays `Sendable` (and cheap to
-        /// copy) while still mirroring the Go plugin's cached-cert behavior.
-        private let certCache: CertCache
+        private struct CachedCert: Sendable {
+            let chain: [NIOSSLCertificate]
+            let key: NIOSSLPrivateKey
+            let certHash: [UInt8]
+            let keyHash: [UInt8]
+            let lastLoadTime: Date
+        }
+
+        /// Cached parsed cert chain and private key, shared across
+        /// copies of the value-typed loader via `NIOLockedValueBox`.
+        /// Mirrors the Go plugin's cached-cert behavior.
+        private let certCache = NIOLockedValueBox<CachedCert?>(nil)
 
         public init(config: ClientTLSAuthPlugin) {
             self.config = config
-            self.certCache = CertCache()
         }
 
         /// ``prepare`` does not change any request headers for this credential type.
@@ -158,7 +166,7 @@ extension OPA {
             let rereadInterval = config.certRereadIntervalSeconds ?? 0
 
             // Fast path: within the re-read window, return the cached value.
-            if let cached = certCache.snapshot(),
+            if let cached = certCache.withLockedValue({ $0 }),
                 rereadInterval > 0,
                 Date().timeIntervalSince(cached.lastLoadTime) < Double(rereadInterval)
             {
@@ -168,11 +176,11 @@ extension OPA {
             let certPEM = try Data(contentsOf: URL(fileURLWithPath: config.cert))
             let keyData = try Data(contentsOf: URL(fileURLWithPath: config.privateKey))
 
-            let certHash = SHA256.hash(data: certPEM)
-            let keyHash = SHA256.hash(data: keyData)
+            let certHash = Array(SHA256.hash(data: certPEM))
+            let keyHash = Array(SHA256.hash(data: keyData))
 
             // Same bytes on disk: reuse the cached/parsed cert.
-            if let cached = certCache.snapshot(),
+            if let cached = certCache.withLockedValue({ $0 }),
                 cached.certHash == certHash,
                 cached.keyHash == keyHash
             {
@@ -191,42 +199,16 @@ extension OPA {
                 setter(Array(passphrase.utf8))
             }
 
-            certCache.store(
-                CertCache.Entry(
+            certCache.withLockedValue {
+                $0 = CachedCert(
                     chain: chain,
                     key: key,
                     certHash: certHash,
                     keyHash: keyHash,
                     lastLoadTime: Date()
                 )
-            )
+            }
             return (chain, key)
         }
-    }
-}
-
-// MARK: - Internal cert cache
-
-/// Reference-typed cache for the parsed client cert chain and private key.
-/// Used by `ClientTLSAuthPluginLoader` so the outer struct remains a `Sendable`
-/// value type while still supporting mutation of cached state across calls.
-private final class CertCache: @unchecked Sendable {
-    struct Entry {
-        let chain: [NIOSSLCertificate]
-        let key: NIOSSLPrivateKey
-        let certHash: SHA256Digest
-        let keyHash: SHA256Digest
-        let lastLoadTime: Date
-    }
-
-    private let lock = NIOLock()
-    private var entry: Entry?
-
-    func snapshot() -> Entry? {
-        lock.withLock { entry }
-    }
-
-    func store(_ e: Entry) {
-        lock.withLock { entry = e }
     }
 }

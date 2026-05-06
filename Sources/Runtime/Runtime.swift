@@ -2,6 +2,7 @@ import AST
 import AsyncHTTPClient
 import Config
 import Foundation
+import Logging
 import Rego
 import RegoExtensions
 import SWCompression
@@ -65,6 +66,8 @@ extension OPA {
 
         /// Bundle loader type list to use for loading bundles. Ordered by priority.
         private nonisolated let bundleLoaders: [BundleLoader.Type]
+
+        public nonisolated let logger: Logger
 
         /// Storage for loaded bundles (both successful and failed).
         public private(set) var bundleStorage: [String: Result<OPA.Bundle, any Swift.Error>]
@@ -135,7 +138,8 @@ extension OPA {
                 OPA.RESTClientBundleLoader.self,
             ],
             configProvider: (any OPA.ConfigProvider)? = nil,
-            customBuiltins: [String: Rego.Builtin] = [:]
+            customBuiltins: [String: Rego.Builtin] = [:],
+            logger: Logger? = nil
         ) throws {
             self.bootConfig = config
             self.activeConfig = config
@@ -149,6 +153,8 @@ extension OPA {
             self.bundleGeneration = 0
             self.queryGeneration = queries?.isEmpty == false ? 1 : 0
             self.bundleStorage = [:]
+
+            self.logger = logger ?? Logger(label: "swift-opa.runtime:\(instanceID)")
 
             // Build config provider.
             if let configProvider {
@@ -291,17 +297,20 @@ extension OPA.Runtime {
         // Fast path: one brief actor hop to read the cache, then evaluate off-actor.
         if let pq = await self.cachedPreparedQuery(for: query) {
             let result = try await pq.evaluate(input: input)
+            self.logger.info("decision: \(decisionID), result: \(result)")
             return OPA.DecisionResult(id: decisionID, result: result)
         }
 
         // Slow path: prepare (actor hop + mutation), then evaluate off-actor.
         let pqs = try await self.prepare(adhocQueries: [query])
         guard let pq = pqs[query] else {
+            self.logger.error("decision: \(decisionID), error: Could not find prepared query for entrypoint \(query)")
             throw RuntimeError(
                 code: .bundleUnpreparedError,
                 message: "Could not find prepared query for entrypoint \(query)")
         }
         let result = try await pq.evaluate(input: input)
+        self.logger.debug("decision: \(decisionID), result: \(result)")
         return OPA.DecisionResult(id: decisionID, result: result)
     }
 }
@@ -333,14 +342,19 @@ extension OPA.Runtime {
             // It runs entirely off the actor and yields configs to the stream.
             if var provider {
                 let polling = Self.pollingConfig(for: provider)
+                self.logger.info("Starting config provider.")
                 group.addTask {
                     defer { configContinuation.finish() }
 
                     while !Task.isCancelled {
                         let result = await provider.load()
 
-                        if case .success(let newConfig) = result {
+                        switch result {
+                        case .success(let newConfig):
+                            self.logger.debug("Config provider returned a new config.")
                             await self.updateActiveConfig(config: newConfig)
+                        case .failure(let error):
+                            self.logger.error("Config provider returned an error: \(error)")
                         }
                         configContinuation.yield(result)
 
@@ -362,6 +376,8 @@ extension OPA.Runtime {
                             }
                         }
                     }
+
+                    self.logger.info("Stopping config provider.")
                 }
             }
 
@@ -386,21 +402,27 @@ extension OPA.Runtime {
                     }
 
                     // Tear down previous generation of pollers.
-                    currentWorkers?.cancel()
-                    await currentWorkers?.value
+                    if let currentWorkers {
+                        self.logger.info("Stopping previous generation of bundle loaders.")
+                        currentWorkers.cancel()
+                        await currentWorkers.value
+                    }
 
                     // Spawn new bundle downloaders as a group.
                     // The nested task here allows cancelling the entire
                     // group of bundle loader workers when we encounter
                     // a new config.
+                    self.logger.info("Starting new generation of bundle loaders.")
                     currentWorkers = Task { [self] in
                         await withTaskGroup(of: Void.self) { bundleGroup in
                             for name in config.bundles.keys {
+                                self.logger.info("Starting bundle loader for bundle: \(name).")
                                 bundleGroup.addTask {
                                     do {
                                         var loader = try self.getBundleLoader(
                                             name: name,
-                                            config: config)
+                                            config: config,
+                                            logger: self.logger)
                                         var longPollingEnabled = false
                                         let polling = config.bundles[name]?.downloaderConfig.polling
 
@@ -431,6 +453,7 @@ extension OPA.Runtime {
                                         // Something failed around setting up the bundle loader. Record the error.
                                         await self.updateBundleResult(name: name, result: .failure(error))
                                     }
+                                    self.logger.info("Stopping bundle loader for bundle: \(name).")
                                 }
                             }
                             // TaskGroup blocks here until all pollers finish or task is canceled.
@@ -495,12 +518,13 @@ extension OPA.Runtime {
     /// for the Runtime.
     nonisolated func getBundleLoader(
         name: String,
-        config: OPA.Config
+        config: OPA.Config,
+        logger: Logger
     ) throws -> OPA.BundleLoader {
         var bundleLoader: OPA.BundleLoader?
         for loaderType in self.bundleLoaders {
             if loaderType.compatibleWithConfig(config: config, bundleResourceName: name) {
-                bundleLoader = try loaderType.init(config: config, bundleResourceName: name)
+                bundleLoader = try loaderType.init(config: config, bundleResourceName: name, logger: logger)
                 break
             }
         }
@@ -528,11 +552,14 @@ extension OPA.Runtime {
         switch (existing, result) {
         case (.success(let old), .success(let new))
         where old == new:
+            self.logger.debug("Bundle \(name) not modified.")
             return
         case (.failure(let old), .failure(let new))
         where old.localizedDescription == new.localizedDescription:
+            self.logger.debug("Bundle \(name) still failed to load with error: \(new).")
             return
         default:
+            self.logger.debug("Updating bundle \(name).")
             break
         }
         // Update the bundle storage.

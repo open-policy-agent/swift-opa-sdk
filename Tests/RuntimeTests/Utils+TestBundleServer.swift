@@ -9,12 +9,13 @@ import NIOSSL
 /// Optional TLS configuration for `TestBundleServer`. When present, the
 /// server terminates TLS in front of the HTTP pipeline. Supplying
 /// `clientCACertPath` makes the server require and validate a client
-/// certificate (mTLS). For self-signed client certs, pass the client
-/// cert itself here.
+/// certificate (mTLS); passing `nil` enables plain server-side TLS
+/// (HTTPS without client authentication). For self-signed client certs
+/// in mTLS tests, pass the client cert itself here.
 struct TestBundleServerTLSOptions: Sendable {
     let serverCertPath: String
     let serverKeyPath: String
-    let clientCACertPath: String
+    let clientCACertPath: String?
 }
 
 // MARK: - Test HTTP(S) Server
@@ -102,25 +103,31 @@ final class TestBundleServer: @unchecked Sendable {
         state: ServerState,
         tls: TestBundleServerTLSOptions?
     ) async throws -> TestBundleServer {
+        TestLogging.ensureBootstrapped()
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
         // NIOSSLContext is thread-safe and may be shared across child channels.
         let sslContext: NIOSSLContext? = try tls.map { opts in
             let serverCerts = try NIOSSLCertificate.fromPEMFile(opts.serverCertPath)
             let serverKey = try NIOSSLPrivateKey(file: opts.serverKeyPath, format: .pem)
-            let clientCAs = try NIOSSLCertificate.fromPEMFile(opts.clientCACertPath)
 
             var cfg = TLSConfiguration.makeServerConfiguration(
                 certificateChain: serverCerts.map { .certificate($0) },
                 privateKey: .privateKey(serverKey)
             )
             cfg.minimumTLSVersion = .tlsv12
-            // Require & validate the client cert, but don't hostname-check
-            // (servers can't meaningfully hostname-check their peer).
-            cfg.certificateVerification = .noHostnameVerification
-            cfg.trustRoots = .certificates(clientCAs)
-            // Helps clients pick a cert when multiple are configured.
-            cfg.sendCANameList = true
+            if let clientCAPath = opts.clientCACertPath {
+                let clientCAs = try NIOSSLCertificate.fromPEMFile(clientCAPath)
+                // Require & validate the client cert, but don't hostname-check
+                // (servers can't meaningfully hostname-check their peer).
+                cfg.certificateVerification = .noHostnameVerification
+                cfg.trustRoots = .certificates(clientCAs)
+                // Helps clients pick a cert when multiple are configured.
+                cfg.sendCANameList = true
+            } else {
+                // Server-side TLS only (HTTPS, no client auth).
+                cfg.certificateVerification = .none
+            }
             return try NIOSSLContext(configuration: cfg)
         }
 

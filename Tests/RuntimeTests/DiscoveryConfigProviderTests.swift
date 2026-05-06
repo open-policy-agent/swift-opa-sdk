@@ -110,6 +110,15 @@ struct DiscoveryConfigProviderTests {
     @Suite("Load")
     struct LoadTests {
 
+        init() {
+            // These tests construct a DiscoveryConfigProvider directly
+            // and call `.load()` without going through the usual
+            // `makeExampleBundle` / `TestBundleServer.start` path that
+            // triggers the logging bootstrap, so we install the silent
+            // handler here explicitly.
+            TestLogging.ensureBootstrapped()
+        }
+
         enum ExpectedResult: Sendable {
             case success(configJSON: String)
             case failure

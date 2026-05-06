@@ -90,7 +90,7 @@ extension OPA {
         public enum Credentials: Codable, Sendable, Equatable {
             case defaultNoAuth
             case bearer(BearerAuthPlugin)
-            case oauth2([String: AnyCodable])
+            case oauth2(OAuth2ClientCredentialsPlugin)
             case clientTLS(ClientTLSAuthPlugin)
             case s3Signing([String: AnyCodable])
             case gcpMetadata(GCPMetadataAuthPlugin)
@@ -143,7 +143,7 @@ extension OPA {
                 case .bearer:
                     self = .bearer(try container.decode(BearerAuthPlugin.self, forKey: .bearer))
                 case .oauth2:
-                    self = .oauth2(try container.decode([String: AnyCodable].self, forKey: .oauth2))
+                    self = .oauth2(try container.decode(OAuth2ClientCredentialsPlugin.self, forKey: .oauth2))
                 case .clientTLS:
                     self = .clientTLS(try container.decode(ClientTLSAuthPlugin.self, forKey: .clientTLS))
                 case .s3Signing:
@@ -171,8 +171,8 @@ extension OPA {
                     break
                 case .bearer(let plugin):
                     try container.encode(plugin, forKey: .bearer)
-                case .oauth2(let config):
-                    try container.encode(config, forKey: .oauth2)
+                case .oauth2(let plugin):
+                    try container.encode(plugin, forKey: .oauth2)
                 case .clientTLS(let plugin):
                     try container.encode(plugin, forKey: .clientTLS)
                 case .s3Signing(let config):

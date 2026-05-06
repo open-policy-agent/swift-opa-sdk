@@ -1,5 +1,6 @@
 import Config
 import Foundation
+import Logging
 import Rego
 import Runtime
 
@@ -89,11 +90,11 @@ extension OPA {
     struct MockBundleLoader: OPA.BundleLoader {
         let id: String
 
-        init(config: OPA.Config, bundleResourceName: String) throws {
+        init(config: OPA.Config, bundleResourceName: String, logger: Logger? = nil) throws {
             self.id = try Self.extractID(from: config)
         }
 
-        init(discoveryConfig config: OPA.Config) throws {
+        init(discoveryConfig config: OPA.Config, logger: Logger? = nil) throws {
             self.id = try Self.extractID(from: config)
         }
 

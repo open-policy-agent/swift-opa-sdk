@@ -2,6 +2,7 @@ import AST
 import AsyncHTTPClient
 import Config
 import Foundation
+import Logging
 import Rego
 
 extension OPA {
@@ -9,14 +10,14 @@ extension OPA {
     /// BundleLoader abstracts over the details of retrieving a bundle.
     public protocol BundleLoader: Sendable {
         /// Needs a public constructor that can build from the config directly.
-        init(config: OPA.Config, bundleResourceName: String) throws
+        init(config: OPA.Config, bundleResourceName: String, logger: Logger?) throws
 
         /// Constructor for loading a discovery bundle.
         ///
         /// The loader should read the bundle location from `config.discovery`
         /// rather than `config.bundles`. Loaders that don't support discovery
         /// inherit a default implementation that throws.
-        init(discoveryConfig: OPA.Config) throws
+        init(discoveryConfig: OPA.Config, logger: Logger?) throws
 
         /// Load the bundle, based on the config and any existing state.
         mutating func load() async -> Result<OPA.Bundle, any Swift.Error>
@@ -41,7 +42,8 @@ extension OPA {
             bundleResourceName: String,
             etag: String?,
             headers: [String: String]?,
-            httpClientConfig: HTTPClient.Configuration?) throws
+            httpClientConfig: HTTPClient.Configuration?,
+            logger: Logger?) throws
 
         /// Constructor for loading a discovery bundle over HTTP.
         ///
@@ -52,7 +54,8 @@ extension OPA {
             discoveryConfig: OPA.Config,
             etag: String?,
             headers: [String: String]?,
-            httpClientConfig: HTTPClient.Configuration?) throws
+            httpClientConfig: HTTPClient.Configuration?,
+            logger: Logger?) throws
 
         /// Used by the loader-managing task to determine whether to sleep or not between polls.
         func isLongPollingEnabled() -> Bool
@@ -68,7 +71,7 @@ extension OPA.BundleLoader {
     }
 
     /// Default: loader throws at init time.
-    public init(discoveryConfig: OPA.Config) throws {
+    public init(discoveryConfig: OPA.Config, logger: Logger?) throws {
         throw RuntimeError(code: .discoveryNotSupported, message: "Bundle loader does not support Discovery")
     }
 
@@ -80,7 +83,8 @@ extension OPA.HTTPBundleLoader {
         discoveryConfig: OPA.Config,
         etag: String?,
         headers: [String: String]?,
-        httpClientConfig: HTTPClient.Configuration?
+        httpClientConfig: HTTPClient.Configuration?,
+        logger: Logger?
     ) throws {
         throw RuntimeError(code: .discoveryNotSupported, message: "Bundle loader does not support Discovery")
     }

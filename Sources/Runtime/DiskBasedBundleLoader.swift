@@ -1,5 +1,6 @@
 import Config
 import Foundation
+import Logging
 import Rego
 
 extension OPA {
@@ -23,7 +24,9 @@ extension OPA {
         /// Polling configuration.
         public let polling: PollingConfig?
 
-        public init(config: OPA.Config, bundleResourceName: String) throws {
+        private var logger: Logger
+
+        public init(config: OPA.Config, bundleResourceName: String, logger: Logger? = nil) throws {
             self.name = bundleResourceName
             guard let resource = config.bundles[bundleResourceName] else {
                 throw RuntimeError(
@@ -49,10 +52,11 @@ extension OPA {
 
             self.polling = resource.downloaderConfig.polling
             self.fetchURL = url
+            self.logger = logger ?? Logger(label: "swift-opa.bundle.disk")
         }
 
         /// Constructor for loading from the `discovery` section of the config.
-        public init(discoveryConfig config: OPA.Config) throws {
+        public init(discoveryConfig config: OPA.Config, logger: Logger? = nil) throws {
             guard let discovery = config.discovery else {
                 throw RuntimeError(
                     code: .internalError,
@@ -77,6 +81,7 @@ extension OPA {
             self.name = "discovery"
             self.fetchURL = url
             self.polling = discovery.downloaderConfig.polling
+            self.logger = Logger(label: "swift-opa.bundle.disk.discovery")
         }
 
         /// Compatibility check against the OPA bundle config section.

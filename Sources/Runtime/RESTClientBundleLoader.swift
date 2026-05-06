@@ -1,6 +1,7 @@
 import AsyncHTTPClient
 import Config
 import Foundation
+import Logging
 import NIOCore  // Needed for type TimeAmount
 import NIOHTTP1  // Needed for type HTTPHeaders
 import Rego
@@ -86,6 +87,12 @@ extension OPA {
         /// HTTPClient configuration to use when polling.
         public private(set) var httpClientConfig: HTTPClient.Configuration
 
+        /// The original HTTPClient.Configuration supplied at init, before
+        /// any per-call credential-driven mutation (e.g. mTLS). Kept so
+        /// every `load()` rebuilds from a clean baseline rather than
+        /// layering on top of the previous call's output.
+        private let baseHTTPClientConfig: HTTPClient.Configuration
+
         /// Polling configuration.
         public let polling: PollingConfig?
 
@@ -96,11 +103,73 @@ extension OPA {
         /// loader will be attempting a long-polling request or not.
         private var longPollingEnabled: Bool
 
+        private var logger: Logger
+
+        /// Credential-type dispatch. Built once from the service's
+        /// credentials at init time and reused by every `load()` call so
+        /// per-loader caches (the client-TLS cert cache, the OAuth2
+        /// token cache) actually persist.
+        private enum CredentialLoader: Sendable {
+            case defaultNoAuth
+            case bearer(BearerAuthPluginLoader)
+            case clientTLS(ClientTLSAuthPluginLoader)
+            case oauth2(OAuth2ClientCredentialsPluginLoader)
+        }
+
+        private let credentialLoader: CredentialLoader
+
+        /// Joins a service base URL with a resource string that may contain
+        /// a query string or fragment.
+        ///
+        /// We had bugs in URL handling previously from using just
+        /// `URL.appending(path:)`, because it treats its argument as a
+        /// literal path component and percent-encodes reserved characters
+        /// like `?` and `#`. That breaks resources of the form
+        /// `example?foo=bar`, which turn into `.../example%3Ffoo=bar`.
+        ///
+        /// Here we split off the query/fragment tail before appending, then
+        /// attach it as a raw suffix.
+        private static func buildFetchURL(baseURL: URL, resource: String) -> URL {
+            guard let splitIdx = resource.firstIndex(where: { $0 == "?" || $0 == "#" }) else {
+                return baseURL.appending(path: resource)
+            }
+            let pathPart = String(resource[..<splitIdx])
+            let queryAndFragment = String(resource[splitIdx...])
+            let withPath = baseURL.appending(path: pathPart)
+            return URL(string: withPath.absoluteString + queryAndFragment) ?? withPath
+        }
+
+        /// Builds the credential loader for a service's credentials. Fails
+        /// for credential types the REST client doesn't yet support, so
+        /// misconfigurations surface at init time rather than at the
+        /// first `load()`.
+        private static func buildCredentialLoader(
+            credentials: ServiceConfig.Credentials?,
+            bundleName: String
+        ) throws -> CredentialLoader {
+            switch credentials {
+            case .none, .defaultNoAuth:
+                return .defaultNoAuth
+            case .bearer(let cfg):
+                return .bearer(BearerAuthPluginLoader(config: cfg))
+            case .clientTLS(let cfg):
+                return .clientTLS(ClientTLSAuthPluginLoader(config: cfg))
+            case .oauth2(let cfg):
+                return .oauth2(OAuth2ClientCredentialsPluginLoader(config: cfg))
+            default:
+                throw RuntimeError(
+                    code: .internalError,
+                    message: "Unsupported bundle service credential type used for bundle config \(bundleName)."
+                )
+            }
+        }
+
         public init(
             config: OPA.Config,
-            bundleResourceName: String
+            bundleResourceName: String,
+            logger: Logger? = nil
         ) throws {
-            self = try Self.init(config: config, bundleResourceName: bundleResourceName, etag: nil)
+            self = try Self.init(config: config, bundleResourceName: bundleResourceName, etag: nil, logger: logger)
         }
 
         public init(
@@ -108,7 +177,8 @@ extension OPA {
             bundleResourceName: String,
             etag: String? = nil,
             headers: [String: String]? = nil,
-            httpClientConfig: HTTPClient.Configuration? = nil
+            httpClientConfig: HTTPClient.Configuration? = nil,
+            logger: Logger? = nil
         ) throws {
             guard let resource = config.bundles[bundleResourceName] else {
                 throw RuntimeError(
@@ -135,30 +205,37 @@ extension OPA {
             }
 
             self.name = name
-            self.fetchURL = service.url.appending(path: resource.resource ?? "/bundle/\(name)")
+            self.fetchURL = Self.buildFetchURL(
+                baseURL: service.url, resource: resource.resource ?? "/bundle/\(name)")
             self.etag = etag ?? ""
             self.serviceConfig = service
             self.bundleConfig = resource
             self.customHeaders = headers ?? [:]
             let httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
             self.httpClientConfig = httpClientConfig
+            self.baseHTTPClientConfig = httpClientConfig
             self.polling = resource.downloaderConfig.polling
             self.lastBundle = nil
             self.longPollingEnabled = false
+            self.logger = logger ?? Logger(label: "swift-opa.bundle.downloader")
+            self.credentialLoader = try Self.buildCredentialLoader(
+                credentials: service.credentials, bundleName: name)
         }
 
         /// Constructor for loading from the `discovery` section of the config.
         public init(
-            discoveryConfig config: OPA.Config
+            discoveryConfig config: OPA.Config,
+            logger: Logger? = nil
         ) throws {
-            self = try Self.init(discoveryConfig: config, etag: nil)
+            self = try Self.init(discoveryConfig: config, etag: nil, logger: logger)
         }
 
         public init(
             discoveryConfig config: OPA.Config,
             etag: String? = nil,
             headers: [String: String]? = nil,
-            httpClientConfig: HTTPClient.Configuration? = nil
+            httpClientConfig: HTTPClient.Configuration? = nil,
+            logger: Logger? = nil
         ) throws {
             guard let discovery = config.discovery else {
                 throw RuntimeError(
@@ -182,8 +259,9 @@ extension OPA {
             }
 
             self.name = "discovery"
-            self.fetchURL = service.url.appending(
-                path: discovery.resource)  // TODO: Should we default this to: "/bundles/discovery"?
+            // TODO: Should we default this to: "/bundles/discovery"?
+            self.fetchURL = Self.buildFetchURL(
+                baseURL: service.url, resource: discovery.resource)
             self.etag = etag ?? ""
             self.serviceConfig = service
             self.bundleConfig = try BundleSourceConfig(
@@ -195,14 +273,18 @@ extension OPA {
             self.customHeaders = headers ?? [:]
             let httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
             self.httpClientConfig = httpClientConfig
+            self.baseHTTPClientConfig = httpClientConfig
             self.polling = discovery.downloaderConfig.polling
             self.lastBundle = nil
             self.longPollingEnabled = false
+            self.logger = logger ?? Logger(label: "swift-opa.bundle.rest-client.discovery")
+            self.credentialLoader = try Self.buildCredentialLoader(
+                credentials: service.credentials, bundleName: "discovery")
         }
 
         /// Compatibility check against the OPA bundle config section.
         /// If the resource is of a supported credential type, this check returns `true`.
-        /// Currently, supported credential types are: (default no auth), Bearer auth, Client TLS auth.
+        /// Currently, supported credential types are: (default no auth), Bearer auth, Client TLS auth, OAuth2 client credentials.
         public static func compatibleWithConfig(config: Config, bundleResourceName: String) -> Bool {
             guard let resource = config.bundles[bundleResourceName] else {
                 return false
@@ -218,7 +300,7 @@ extension OPA {
             }
 
             switch service.credentials {
-            case .defaultNoAuth, .bearer(_), .clientTLS(_): return true
+            case .defaultNoAuth, .bearer(_), .clientTLS(_), .oauth2(_): return true
             // Other REST client types not implemented yet.
             default: return false
             }
@@ -241,7 +323,7 @@ extension OPA {
             }
 
             switch service.credentials {
-            case .defaultNoAuth, .bearer(_), .clientTLS(_): return true
+            case .defaultNoAuth, .bearer(_), .clientTLS(_), .oauth2(_): return true
             default: return false
             }
         }
@@ -263,35 +345,43 @@ extension OPA {
             }
 
             // Set authorization headers.
-            switch self.serviceConfig.credentials {
-            case .defaultNoAuth: break
-            case .bearer(let pluginConfig):
-                let loader: OPA.BearerAuthPluginLoader = BearerAuthPluginLoader(config: pluginConfig)
+            switch self.credentialLoader {
+            case .defaultNoAuth:
+                break
+            case .bearer(let loader):
+                self.logger.info("Preparing bundle request with bearer authentication")
                 do {
                     try loader.prepare(req: &httpRequest)
                 } catch {
                     return .failure(error)
                 }
-            case .clientTLS(let pluginConfig):
-                let loader = OPA.ClientTLSAuthPluginLoader(config: pluginConfig)
+            case .clientTLS(let loader):
                 do {
-                    // prepare is a no-op for clientTLS, but keep the pattern symmetric.
+                    // `prepare` is a no-op for clientTLS; kept for symmetry.
                     try loader.prepare(req: &httpRequest)
-                    // If the caller didn't pre-build an mTLS-aware httpClientConfig,
-                    // build one here, mutating self.httpClientConfig if needed.
+                    // Rebuild the effective HTTPClient.Configuration from
+                    // the immutable baseline on every call. The loader's
+                    // internal cert cache makes this cheap when the on-disk
+                    // cert hasn't changed (SHA256-compared bytes reuse the
+                    // parsed cert chain / key).
                     self.httpClientConfig = try loader.newHTTPClientConfig(
                         service: self.serviceConfig,
-                        base: self.httpClientConfig
+                        base: self.baseHTTPClientConfig
                     )
                 } catch {
                     return .failure(error)
                 }
-            default:
-                return .failure(
-                    RuntimeError(
-                        code: .internalError,
-                        message: "Unsupported bundle service type used for bundle config \(name)."
-                    ))
+            case .oauth2(let loader):
+                self.logger.info("Preparing bundle request with OAuth2 client credentials authentication")
+                do {
+                    try await loader.prepare(
+                        req: &httpRequest,
+                        service: self.serviceConfig,
+                        logger: self.logger
+                    )
+                } catch {
+                    return .failure(error)
+                }
             }
 
             // Set If-None-Match header for ETag supporting servers.
@@ -321,6 +411,7 @@ extension OPA {
                     configuration: self.httpClientConfig,
                     backgroundActivityLogger: nil,
                     { httpClient in
+                        self.logger.info("Attempting to fetch bundle from URL: \(self.fetchURL)")
                         let response =
                             if longPollingTA > 0 {
                                 try await httpClient.execute(httpRequest, timeout: .seconds(longPollingTA))
@@ -349,7 +440,9 @@ extension OPA {
                         guard (200..<300).contains(response.status.code) else {
                             throw RuntimeError(
                                 code: .internalError,
-                                message: "Bundle download failed with response code: \(response.status.code)")
+                                message:
+                                    "Bundle download on url \(self.fetchURL) failed with response code: \(response.status.code), body: \(String(buffer: body))"
+                            )
                         }
 
                         // Convert ByteBuffer to Data.
@@ -381,7 +474,7 @@ extension OPA {
     }
 
     /// Emulates the same basic functionality as the `rest.bearerAuthPlugin` type from OPA.
-    public struct BearerAuthPluginLoader {
+    public struct BearerAuthPluginLoader: Sendable {
         public let config: BearerAuthPlugin
 
         public init(config: BearerAuthPlugin) {

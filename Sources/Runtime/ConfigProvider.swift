@@ -1,5 +1,6 @@
 import Config
 import Foundation
+import Logging
 import Rego
 
 extension OPA {
@@ -19,7 +20,7 @@ extension OPA {
     /// off to a child task in the Runtime's task group.
     public protocol ConfigProvider: Sendable {
         /// Needs a public constructor that can build from the config directly.
-        init(config: OPA.Config) throws
+        init(config: OPA.Config, logger: Logger?) throws
 
         /// Load (or re-load) the discovered configuration, based on the
         /// initial config and any existing state.
