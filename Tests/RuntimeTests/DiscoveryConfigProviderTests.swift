@@ -363,4 +363,130 @@ struct DiscoveryConfigProviderTests {
             #expect(provider.isLongPollingEnabled() == false)
         }
     }
+
+    // MARK: - Plan Injection / Validation Tests
+
+    /// Covers the three ways a discovery bundle can interact with the
+    /// configured `discovery.decision` entrypoint:
+    ///   (a) plan present + name matches -> bundle used as-is
+    ///   (b) plan present + name does not match -> load() fails with a
+    ///       descriptive error rather than silently overriding the bundle
+    ///   (c) no plan present -> a ``MiniPlanner``-generated fallback plan
+    ///       is injected so data-only bundles resolve against their data tree
+    @Suite("PlanInjection")
+    struct PlanInjectionTests {
+
+        init() {
+            TestLogging.ensureBootstrapped()
+        }
+
+        /// Builds a plan-less discovery bundle whose data tree contains the
+        /// intended OPA.Config at the path specified by `discovery.config`.
+        /// This is intended for testing the MiniPlanner's data query plans.
+        static func makeDataOnlyDiscoveryBundle(configJSON: String) throws -> OPA.Bundle {
+            let configValue = try JSONDecoder().decode(AST.RegoValue.self, from: Data(configJSON.utf8))
+            let nested: AST.RegoValue = .object([
+                .string("discovery"): .object([.string("config"): configValue])
+            ])
+            let manifest = OPA.Manifest(revision: UUID().uuidString, roots: ["discovery/config"])
+            return try OPA.Bundle(
+                manifest: manifest,
+                planFiles: [],
+                regoFiles: [],
+                data: nested
+            )
+        }
+
+        /// Decodes the LoadTests boot-config template with a given mock ID.
+        static func makeBootConfig(mockID: String) throws -> OPA.Config {
+            let json = LoadTests.bootConfigTemplate.replacingOccurrences(
+                of: "__MOCK_ID__", with: mockID)
+            return try JSONDecoder().decode(OPA.Config.self, from: Data(json.utf8))
+        }
+
+        @Test("Plan present + decision matches plan name -> load succeeds")
+        func planPresentMatchSucceeds() async throws {
+            // decisionPath (plan name) matches the boot config's
+            // `discovery.decision` ("discovery/config").
+            let bundle = try makeDiscoveryBundle(
+                decisionPath: "discovery/config",
+                configDataPath: "my/discovery/data/path",
+                configJSON: """
+                    { "labels": { "env": "prod" } }
+                    """
+            )
+
+            let mockID = MockBundleLoaderRegistry.shared.register(scripted: [.success(bundle)])
+            defer { MockBundleLoaderRegistry.shared.unregister(id: mockID) }
+
+            var provider = try OPA.DiscoveryConfigProvider(
+                bootConfig: try Self.makeBootConfig(mockID: mockID),
+                bundleLoaders: [OPA.MockBundleLoader.self]
+            )
+
+            let result = await provider.load()
+            guard case .success(let merged) = result else {
+                Issue.record("Expected success, got \(result)")
+                return
+            }
+            #expect(merged.labels["env"] == "prod")
+        }
+
+        @Test("Plan present + decision does not match plan name -> load fails")
+        func planPresentMismatchErrors() async throws {
+            // Plan name is `different/path`, but boot config's decision is
+            // `discovery/config`. The provider should refuse to silently
+            // inject a fallback plan.
+            let bundle = try makeDiscoveryBundle(
+                decisionPath: "different/path",
+                configDataPath: "some/data/path",
+                configJSON: """
+                    { "labels": { "env": "prod" } }
+                    """
+            )
+
+            let mockID = MockBundleLoaderRegistry.shared.register(scripted: [.success(bundle)])
+            defer { MockBundleLoaderRegistry.shared.unregister(id: mockID) }
+
+            var provider = try OPA.DiscoveryConfigProvider(
+                bootConfig: try Self.makeBootConfig(mockID: mockID),
+                bundleLoaders: [OPA.MockBundleLoader.self]
+            )
+
+            let result = await provider.load()
+            guard case .failure(let error) = result else {
+                Issue.record("Expected failure, got \(result)")
+                return
+            }
+            // The error message should name both the bundle's plan and the
+            // expected entrypoint so the operator can diagnose easily.
+            let msg = String(describing: error)
+            #expect(msg.contains("different/path"), "error should name the bundle's plan: \(msg)")
+            #expect(msg.contains("discovery/config"), "error should name the expected entrypoint: \(msg)")
+        }
+
+        @Test("Plan missing -> MiniPlanner fallback resolves data-only bundle")
+        func planMissingInjectsMiniPlanner() async throws {
+            let bundle = try Self.makeDataOnlyDiscoveryBundle(
+                configJSON: """
+                    { "labels": { "env": "staging" } }
+                    """
+            )
+
+            let mockID = MockBundleLoaderRegistry.shared.register(scripted: [.success(bundle)])
+            defer { MockBundleLoaderRegistry.shared.unregister(id: mockID) }
+
+            var provider = try OPA.DiscoveryConfigProvider(
+                bootConfig: try Self.makeBootConfig(mockID: mockID),
+                bundleLoaders: [OPA.MockBundleLoader.self]
+            )
+
+            let result = await provider.load()
+            guard case .success(let merged) = result else {
+                Issue.record("Expected success, got \(result)")
+                return
+            }
+            #expect(merged.labels["env"] == "staging")
+        }
+    }
 }

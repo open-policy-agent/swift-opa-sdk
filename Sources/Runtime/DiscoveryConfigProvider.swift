@@ -2,6 +2,7 @@ import AST
 import AsyncHTTPClient
 import Config
 import Foundation
+import IR
 import Logging
 import Rego
 
@@ -41,7 +42,21 @@ extension OPA {
         /// May mutate over time due to state caching in the loader.
         private var loader: any OPA.BundleLoader
 
+        /// Logger instance to use for log messages.
         private var logger: Logger
+
+        /// Query string derived from `discoveryConfig.decision` and used to
+        /// evaluate the discovery bundle (`data` / `data.<dot.path>`).
+        private let discoveryQuery: String
+
+        /// Slash-form entrypoint derived from ``discoveryQuery``. A bundle
+        /// that ships a plan must have a plan with this name.
+        private let discoveryEntrypoint: String
+
+        /// Pre-rendered plan.json ready to slot into ``Rego/BundleFile`` when
+        /// a discovery bundle ships with no plan. Generated once at init via
+        /// ``MiniPlanner``.
+        private let fallbackPlanFile: Rego.BundleFile
 
         /// Constructs a DiscoveryConfigProvider from the provided boot config.
         public init(config: OPA.Config, logger: Logger? = nil) throws {
@@ -75,6 +90,24 @@ extension OPA {
             self.bootConfig = bootConfig
             self.discoveryConfig = discoveryConfig
 
+            // Derive the discovery query and slash-form entrypoint once, at
+            // init time, so every subsequent `load()` uses the same values.
+            // If the boot config changes, the Runtime replaces this provider
+            // with a fresh instance.
+            let query = Self.discoveryQuery(forDecision: discoveryConfig.decision)
+            let entrypoint = try queryToEntryPoint(query)
+            self.discoveryQuery = query
+            self.discoveryEntrypoint = entrypoint
+
+            // Pre-render a fallback plan.json so we can inject it into any
+            // data-only discovery bundle without redoing the work per-load.
+            let policy = try MiniPlanner.generate(query: query)
+            let planData = try JSONEncoder().encode(policy)
+            self.fallbackPlanFile = Rego.BundleFile(
+                url: URL(string: "/plan.json")!,
+                data: planData
+            )
+
             // Find the first compatible loader and construct it.
             var constructed: (any OPA.BundleLoader)?
             for loaderType in bundleLoaders {
@@ -100,16 +133,20 @@ extension OPA {
         /// Loads (or re-loads) the discovered configuration once.
         ///
         /// Fetches the discovery bundle via the underlying loader, evaluates
-        /// it to produce a config, and merges it with the boot config.
+        /// it to produce a config, and merges it with the boot config. Bundles
+        /// that ship with no plan get a ``MiniPlanner``-generated data-lookup
+        /// plan injected so direct `data.<path>` discovery queries resolve
+        /// against the bundle's data tree.
         public mutating func load() async -> Result<OPA.Config, any Swift.Error> {
             let result = await self.loader.load()
 
             switch result {
             case .success(let bundle):
                 do {
+                    let preparedBundle = try prepareBundleForEvaluation(bundle)
                     let discoveredConfig = try await Self.evaluateDiscoveryBundle(
-                        bundle: bundle,
-                        decision: discoveryConfig.decision
+                        bundle: preparedBundle,
+                        query: discoveryQuery
                     )
                     let mergedConfig = try Self.mergeConfigs(
                         boot: bootConfig,
@@ -122,6 +159,46 @@ extension OPA {
             case .failure(let error):
                 return .failure(error)
             }
+        }
+
+        // MARK: - Plan Injection / Validation
+
+        /// Returns the bundle as-is when its existing plans cover the
+        /// configured decision entrypoint, or a copy with a
+        /// ``MiniPlanner``-generated plan attached when the bundle has no
+        /// plan files.
+        ///
+        /// Throws a descriptive error when the bundle ships with IR plans
+        /// but none match the configured `discovery.decision` path.
+        private func prepareBundleForEvaluation(_ bundle: OPA.Bundle) throws -> OPA.Bundle {
+            if bundle.planFiles.isEmpty {
+                var injected = bundle
+                injected.planFiles = [fallbackPlanFile]
+                return injected
+            }
+
+            // Collect plan names from every planFile in the bundle. An
+            // unparseable plan.json will error here rather than at query
+            // preparation time.
+            var planNames: [String] = []
+            for planFile in bundle.planFiles {
+                let policy = try IR.Policy(jsonData: planFile.data)
+                planNames.append(contentsOf: policy.plans?.plans.map(\.name) ?? [])
+            }
+
+            guard planNames.contains(discoveryEntrypoint) else {
+                throw RuntimeError(
+                    code: .invalidArgumentError,
+                    message: """
+                        Discovery bundle ships plans \(planNames) but none matches the \
+                        configured `discovery.decision` entrypoint "\(discoveryEntrypoint)". \
+                        Either remove `discovery.decision` (or change it to match an existing plan), \
+                        or rebuild the discovery bundle with a plan at that path.
+                        """
+                )
+            }
+
+            return bundle
         }
 
         // MARK: - HTTPConfigProvider
@@ -141,28 +218,29 @@ extension OPA {
 
         // MARK: - Bundle Evaluation
 
-        /// Evaluates the discovery bundle to produce a configuration.
-        ///
-        /// The discovery bundle is loaded into a temporary engine and the
-        /// configured decision query is evaluated with an empty input.
-        /// The result is JSON-round-tripped into an ``OPA.Config``.
+        /// Builds the full query string used to evaluate a discovery bundle
+        /// from the `discovery.decision` config value.
         ///
         /// Decision path convention (per the OPA spec):
         /// - `nil` / empty -> query `data`
         /// - `"example/discovery"` -> query `data.example.discovery`
+        static func discoveryQuery(forDecision decision: String?) -> String {
+            guard let decision, !decision.isEmpty else {
+                return "data"
+            }
+            let dotPath = decision.trimmingCharacters(in: ["/"]).replacingOccurrences(of: "/", with: ".")
+            return dotPath.hasPrefix("data.") ? dotPath : "data.\(dotPath)"
+        }
+
+        /// Evaluates the discovery bundle to produce a configuration.
+        ///
+        /// The discovery bundle is loaded into a temporary engine and the
+        /// provided query is evaluated with an empty input. The result is
+        /// JSON-round-tripped into an ``OPA.Config``.
         static func evaluateDiscoveryBundle(
             bundle: OPA.Bundle,
-            decision: String?
+            query: String
         ) async throws -> OPA.Config {
-            let query: String
-            if let decision, !decision.isEmpty {
-                let dotPath = decision.trimmingCharacters(in: ["/"]).replacingOccurrences(of: "/", with: ".")
-                query = dotPath.hasPrefix("data.") ? dotPath : "data.\(dotPath)"
-            } else {
-                // If no decision path was provided, just evaluate `data`.
-                query = "data"
-            }
-
             var engine = OPA.Engine(
                 bundles: ["discovery": bundle],
                 capabilities: nil,
