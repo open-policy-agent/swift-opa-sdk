@@ -27,6 +27,10 @@ let package = Package(
         // Placeholder until we decide how to handle tar.gz wrangling:
         .package(
             url: "https://github.com/tsolomko/SWCompression", revision: "5b57ac0fcd78ccd9f42644a4cf7a379ec3821ef1"),
+        // Pinned: BitByteData >=3.x bumps its minimum to macOS 14 and conflicts
+        // with SWCompression's macOS 11 target via swift-opa-sdk. 2.0.4 is the
+        // last known-good version that works with our macOS 13 platform floor.
+        .package(url: "https://github.com/tsolomko/BitByteData", exact: "2.0.4"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
     ],
     targets: [
@@ -64,6 +68,7 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "SwiftOPA", package: "swift-opa"),
                 .product(name: "SWCompression", package: "SWCompression"),
+                .product(name: "BitByteData", package: "BitByteData"),  // Direct dep here to silence warnings.
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Yams", package: "Yams"),
             ],

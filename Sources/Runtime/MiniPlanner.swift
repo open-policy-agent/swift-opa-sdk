@@ -67,7 +67,7 @@ internal enum MiniPlanner {
                         IR.DotStatement(
                             source: IR.Operand(type: .local, value: .localIndex(src)),
                             key: IR.Operand(type: .stringIndex, value: .stringIndex(keyIdx)),
-                            target: AST.Local(dst)
+                            target: IR.Local(dst)
                         )
                     )
                 )
