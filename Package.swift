@@ -32,6 +32,10 @@ let package = Package(
         // last known-good version that works with our macOS 13 platform floor.
         .package(url: "https://github.com/tsolomko/BitByteData", exact: "2.0.4"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
+        // Backports stdlib `Mutex<T>` (Synchronization module, macOS 15+) to
+        // our macOS 13 platform floor. One-line swap to the stdlib once the
+        // floor moves to macOS 15.
+        .package(url: "https://github.com/swhitty/swift-mutex.git", .upToNextMajor(from: "0.0.5")),
     ],
     targets: [
         .target(
@@ -71,6 +75,7 @@ let package = Package(
                 .product(name: "BitByteData", package: "BitByteData"),  // Direct dep here to silence warnings.
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Yams", package: "Yams"),
+                .product(name: "Mutex", package: "swift-mutex"),
             ],
             path: "Sources/Runtime"
         ),
