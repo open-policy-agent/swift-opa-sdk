@@ -3,6 +3,7 @@ import AsyncHTTPClient
 import Config
 import Foundation
 import Logging
+import Mutex
 import Rego
 import RegoExtensions
 import SWCompression
@@ -21,6 +22,27 @@ extension OPA {
     /// automatically handle applying updates to the underlying
     /// policy and data stores as needed.
     ///
+    /// ## Concurrency
+    ///
+    /// `Runtime` is a `final class` marked `@unchecked Sendable`. Internal
+    /// mutable state is partitioned into three groups, each guarded by its
+    /// own `Mutex`:
+    ///
+    ///  - **Config state** (`configState`): active config, last-attempt
+    ///    result, generation counter, and the optional config provider.
+    ///  - **Bundle state** (`bundleState`): per-bundle load results, the
+    ///    bundle generation counter, and a cache of successful bundles.
+    ///  - **Query state** (`queryState`): the registered query set,
+    ///    prepared queries, and the generation snapshots that were used
+    ///    to prepare them.
+    ///
+    /// Lock-order discipline: when more than one lock is involved in a
+    /// single operation (only `prepare()` and `decision()` need this),
+    /// `bundleState` is acquired before `queryState`, and the locks are
+    /// never held simultaneously across an `await`. All long-running
+    /// async work (bundle/config fetches, query preparation, evaluation)
+    /// runs without any lock held.
+    ///
     /// ## Lifecycle
     ///
     /// After initialization, call ``run()`` to start background workers
@@ -29,7 +51,7 @@ extension OPA {
     /// point all workers are torn down via structured concurrency.
     ///
     /// ```swift
-    /// let runtime = await OPA.Runtime(config: myConfig)
+    /// let runtime = try OPA.Runtime(config: myConfig)
     /// let runtimeTask = Task { try await runtime.run() }
     ///
     /// // Make policy decisions at any time while run() is active:
@@ -42,80 +64,121 @@ extension OPA {
     /// You can also use the Runtime without calling `run()` — it will
     /// function with whatever bundles were loaded at init time, but
     /// config providers and bundle polling will not be active.
-    public actor Runtime {
+    public final class Runtime: @unchecked Sendable {
+        // MARK: Immutable state
+
         /// The immutable boot configuration. Retained for merge precedence
         /// when a config provider produces new configuration.
-        public nonisolated let bootConfig: OPA.Config
-
-        /// The active configuration this Runtime is using.
-        public private(set) var activeConfig: OPA.Config
-
-        /// Result of the last config load attempt.
-        public private(set) var lastestConfig: Result<OPA.Config, any Swift.Error>?
-
-        /// Monotonic counter incremented on every config change.
-        private var configGeneration: UInt64 = 0
-
-        /// Optional config provider (e.g. discovery) that produces
-        /// configuration updates over time. Built at init from the boot
-        /// config or injected directly as an init parameter.
-        private var configProvider: (any OPA.ConfigProvider)?
+        public let bootConfig: OPA.Config
 
         /// The ID this Runtime instance uses to identify itself in logs and traces.
-        public nonisolated let instanceID: String
+        public let instanceID: String
 
         /// A set of additional builtins that will be provided to the Engine
         /// during query preparation.
-        public nonisolated let customBuiltins: [String: Rego.Builtin]
+        public let customBuiltins: [String: Rego.Builtin]
 
-        /// HTTP client configuration to use in off-actor bundle loaders.
-        public nonisolated let httpClientConfig: HTTPClient.Configuration?
+        /// HTTP client configuration to use in bundle loaders.
+        public let httpClientConfig: HTTPClient.Configuration?
 
         /// Bundle loader type list to use for loading bundles. Ordered by priority.
-        private nonisolated let bundleLoaders: [BundleLoader.Type]
+        private let bundleLoaders: [BundleLoader.Type]
 
-        public nonisolated let logger: Logger
+        public let logger: Logger
 
-        /// Storage for loaded bundles (both successful and failed).
-        public private(set) var bundleStorage: [String: Result<OPA.Bundle, any Swift.Error>]
+        // MARK: Mutable state (each group guarded by its own Mutex)
 
-        /// Cache of successful bundles, derived from `bundleStorage`.
-        /// Rebuilt lazily when `bundleGeneration` advances past `cachedBundlesGeneration`.
-        private var cachedBundles: [String: OPA.Bundle] = [:]
-        private var cachedBundlesGeneration: UInt64 = .max  // force first build
+        /// Group: Configuration state.
+        private struct ConfigState {
+            var activeConfig: OPA.Config
+            var latestConfig: Result<OPA.Config, any Swift.Error>?
+            /// Monotonic counter incremented on every config change.
+            var configGeneration: UInt64
+            /// Optional config provider (e.g. discovery) that produces
+            /// configuration updates over time. Built at init from the boot
+            /// config or injected directly as an init parameter.
+            var configProvider: (any OPA.ConfigProvider)?
+        }
+        private let configState: Mutex<ConfigState>
 
-        public var bundles: [String: OPA.Bundle] {
-            if cachedBundlesGeneration != bundleGeneration {
-                var result: [String: OPA.Bundle] = [:]
-                result.reserveCapacity(bundleStorage.count)
-                for (name, storage) in bundleStorage {
-                    if case .success(let bundle) = storage { result[name] = bundle }
-                }
-                cachedBundles = result
-                cachedBundlesGeneration = bundleGeneration
-            }
-            return cachedBundles
+        /// Group: Bundle state.
+        private struct BundleState {
+            /// Storage for loaded bundles (both successful and failed).
+            var bundleStorage: [String: Result<OPA.Bundle, any Swift.Error>] = [:]
+            /// Monotonic counter incremented on every bundle change.
+            /// Used to detect interleaved updates during async preparation.
+            var bundleGeneration: UInt64 = 0
+            /// Cache of successful bundles, derived from `bundleStorage`.
+            /// Rebuilt lazily when `bundleGeneration` advances past
+            /// `cachedBundlesGeneration`.
+            var cachedBundles: [String: OPA.Bundle] = [:]
+            /// Sentinel `.max` forces the first read to populate the cache.
+            var cachedBundlesGeneration: UInt64 = .max
+        }
+        private let bundleState: Mutex<BundleState>
+
+        /// Group: Query and prepared-query state.
+        private struct QueryState {
+            /// Set of "always on" queries that will be automatically prepared
+            /// on bundle changes.
+            var queries: Set<String>
+            /// Cache for prepared queries. Invalidated when bundles change.
+            /// FUTURE: Optimization opportunity — invalidate only the
+            /// affected *subset* of queries.
+            var preparedQueries: [String: OPA.Engine.PreparedQuery] = [:]
+            /// Monotonic counter incremented on every query set change.
+            var queryGeneration: UInt64
+            /// Bundle generation observed at the last successful prepare.
+            var preparedBundleGeneration: UInt64 = 0
+            /// Query generation observed at the last successful prepare.
+            var preparedQueryGeneration: UInt64 = 0
+        }
+        private let queryState: Mutex<QueryState>
+
+        // MARK: Public synchronous accessors
+        //
+        // Each accessor below briefly takes its group's lock and returns
+        // a by-value snapshot.
+
+        /// The active configuration this Runtime is using.
+        public var activeConfig: OPA.Config {
+            configState.withLock { $0.activeConfig }
         }
 
-        /// Cache for prepared queries. Invalidated when bundles change.
-        /// FUTURE: Optimization opportunity — invalidate only the affected *subset* of queries.
-        private var preparedQueries: [String: Engine.PreparedQuery]
+        /// Result of the last config load attempt.
+        public var latestConfig: Result<OPA.Config, any Swift.Error>? {
+            configState.withLock { $0.latestConfig }
+        }
 
-        /// List of "always on" queries that will be automatically prepared on bundle changes.
-        public private(set) var queries: Set<String>
+        /// Snapshot of the bundle storage, including failed loads.
+        public var bundleStorage: [String: Result<OPA.Bundle, any Swift.Error>] {
+            bundleState.withLock { $0.bundleStorage }
+        }
 
-        /// Monotonic counter incremented on every bundle change.
-        /// Used to detect interleaved updates during async preparation.
-        private var bundleGeneration: UInt64
+        /// Snapshot of successfully-loaded bundles.
+        public var bundles: [String: OPA.Bundle] {
+            bundleState.withLock { state in
+                if state.cachedBundlesGeneration != state.bundleGeneration {
+                    var result: [String: OPA.Bundle] = [:]
+                    result.reserveCapacity(state.bundleStorage.count)
+                    for (name, storage) in state.bundleStorage {
+                        if case .success(let bundle) = storage {
+                            result[name] = bundle
+                        }
+                    }
+                    state.cachedBundles = result
+                    state.cachedBundlesGeneration = state.bundleGeneration
+                }
+                return state.cachedBundles
+            }
+        }
 
-        /// Monotonic counter incremented on every query set change.
-        private var queryGeneration: UInt64
+        /// Snapshot of the registered query set.
+        public var queries: Set<String> {
+            queryState.withLock { $0.queries }
+        }
 
-        /// Tracking variable for the bundle generation at the last prepare() call.
-        private var preparedBundleGeneration: UInt64 = 0
-
-        /// Tracking variable for the query generation at the last prepare() call.
-        private var preparedQueryGeneration: UInt64 = 0
+        // MARK: Init
 
         /// Initialize a Runtime with the given boot configuration.
         ///
@@ -149,28 +212,35 @@ extension OPA {
             logger: Logger? = nil
         ) throws {
             self.bootConfig = config
-            self.activeConfig = config
             self.instanceID = instanceID
             self.customBuiltins = SDKBuiltinFuncs.sdkDefaultBuiltins.merging(
                 customBuiltins, uniquingKeysWith: { (_, new) in new })
             self.httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
             self.bundleLoaders = bundleLoaders
-            self.preparedQueries = [:]
-            self.queries = Set(queries ?? [])
-            self.bundleGeneration = 0
-            self.queryGeneration = queries?.isEmpty == false ? 1 : 0
-            self.bundleStorage = [:]
-
             self.logger = logger ?? Logger(label: "swift-opa.runtime:\(instanceID)")
 
             // Build config provider.
+            let resolvedProvider: (any OPA.ConfigProvider)?
             if let configProvider {
-                self.configProvider = configProvider
+                resolvedProvider = configProvider
             } else if config.discovery != nil {
-                self.configProvider = try DiscoveryConfigProvider(bootConfig: config, bundleLoaders: bundleLoaders)
+                resolvedProvider = try DiscoveryConfigProvider(bootConfig: config, bundleLoaders: bundleLoaders)
             } else {
-                self.configProvider = nil
+                resolvedProvider = nil
             }
+
+            self.configState = Mutex(
+                ConfigState(
+                    activeConfig: config,
+                    latestConfig: nil,
+                    configGeneration: 0,
+                    configProvider: resolvedProvider))
+            self.bundleState = Mutex(BundleState())
+            let initialQueries = Set(queries ?? [])
+            self.queryState = Mutex(
+                QueryState(
+                    queries: initialQueries,
+                    queryGeneration: initialQueries.isEmpty ? 0 : 1))
         }
     }
 }
@@ -180,96 +250,166 @@ extension OPA {
 extension OPA.Runtime {
     /// Adds a query that will automatically be prepared for later evaluation.
     public func addQuery(_ query: String) {
-        if !self.queries.contains(query) {
-            self.queries.insert(query)
-            self.queryGeneration &+= 1
+        queryState.withLock { state in
+            if state.queries.insert(query).inserted {
+                state.queryGeneration &+= 1
+            }
         }
     }
 
     /// Adds a list of queries from a sequence that will automatically be prepared for later evaluation.
     public func addQueries<S>(_ queries: S) where String == S.Element, S: Sequence {
-        if !self.queries.isSuperset(of: queries) {
-            self.queries.formUnion(queries)
-            self.queryGeneration &+= 1
+        queryState.withLock { state in
+            if !state.queries.isSuperset(of: queries) {
+                state.queries.formUnion(queries)
+                state.queryGeneration &+= 1
+            }
         }
     }
 
     /// Removes a query that will automatically be prepared for later evaluation.
     public func removeQuery(_ query: String) {
-        if self.queries.contains(query) {
-            self.queries.remove(query)
-            self.preparedQueries.removeValue(forKey: query)
-            self.queryGeneration &+= 1
+        queryState.withLock { state in
+            if state.queries.remove(query) != nil {
+                state.preparedQueries.removeValue(forKey: query)
+                state.queryGeneration &+= 1
+            }
         }
     }
 
     /// Removes a list of queries from the set the Runtime maintains.
     public func removeQueries<S>(_ queries: S) where String == S.Element, S: Sequence {
-        let queryCount = self.queries.count
-        self.queries.subtract(queries)
-        for query in queries {
-            self.preparedQueries.removeValue(forKey: query)
+        queryState.withLock { state in
+            let queryCount = state.queries.count
+            state.queries.subtract(queries)
+            for query in queries {
+                state.preparedQueries.removeValue(forKey: query)
+            }
+            if state.queries.count < queryCount {
+                state.queryGeneration &+= 1
+            }
         }
+    }
 
-        if self.queries.count < queryCount {
-            self.queryGeneration &+= 1
-        }
+    /// Action computed under the query lock describing what `prepare()`
+    /// should do off-lock.
+    private enum PrepareAction {
+        case upToDate
+        /// Prepare only the listed queries and merge into existing cache.
+        case partial(queriesToPrepare: Set<String>, queryGen: UInt64)
+        /// Rebuild the entire prepared-query cache.
+        case full(queriesToPrepare: Set<String>, bundleGen: UInt64, queryGen: UInt64)
     }
 
     /// Prepares queries for later evaluation. Intended for use only
     /// within the Runtime to ensure a set of prepared queries is available.
-    /// Warning: Actor concurrency semantics make some bits more subtle
-    /// here than expected.
+    ///
+    /// Concurrency notes:
+    ///  - All long-running work (engine setup, query preparation) runs
+    ///    *without* any lock held.
+    ///  - Generations are snapshotted before going off-lock so that on
+    ///    commit we can detect that newer writes have invalidated our
+    ///    work; in that case we still publish prepared queries (they are
+    ///    not wrong, just possibly stale) but record the snapshot
+    ///    generations so subsequent callers re-prepare.
     private func prepare(adhocQueries: [String]) async throws -> [String: OPA.Engine.PreparedQuery] {
-        // Ensure any new queries are added for tracking.
-        let adhocQuerySet = Set(adhocQueries)
-        if !adhocQuerySet.isSubset(of: self.queries) {
-            self.queries.formUnion(adhocQueries)
-            self.queryGeneration &+= 1
-        }
-
-        // Nothing to do if we are already up-to-date.
-        let sameBundleGeneration = self.bundleGeneration == self.preparedBundleGeneration
-        let sameQueryGeneration = self.queryGeneration == self.preparedQueryGeneration
-
-        // Snapshot generations before the async work.
-        let bundleGen = self.bundleGeneration
-        let queryGen = self.queryGeneration
-        switch (sameBundleGeneration, sameQueryGeneration) {
-        case (true, true):
-            // We're already up-to-date.
-            break
-        case (true, false):
-            // Prepare any queries not already in the cache.
-            let unprepared = self.queries.subtracting(self.preparedQueries.keys)
-            if !unprepared.isEmpty {
-                let pq = try await Self.prepareQueries(
-                    bundles: self.bundles,
-                    queries: unprepared,
-                    customBuiltins: self.customBuiltins)
-                self.preparedQueries.merge(pq, uniquingKeysWith: { (_, new) in new })
+        // Ensure any new ad-hoc queries are tracked.
+        queryState.withLock { state in
+            let adhocSet = Set(adhocQueries)
+            if !adhocSet.isSubset(of: state.queries) {
+                state.queries.formUnion(adhocSet)
+                state.queryGeneration &+= 1
             }
-            self.preparedQueryGeneration = queryGen
-        default:
-            // Rebuild all queries if bundles are out of date.
-            let pq = try await Self.prepareQueries(
-                bundles: self.bundles,
-                queries: self.queries,
-                customBuiltins: self.customBuiltins)
-
-            // Commit results. Only mark as "caught up" to the generation
-            // we snapshotted — if a newer generation arrived mid-loop,
-            // the counters won't match and the next caller re-prepares.
-            self.preparedQueries = pq
-            self.preparedBundleGeneration = bundleGen
-            self.preparedQueryGeneration = queryGen
         }
-        return self.preparedQueries
+
+        // Snapshot bundles + bundle generation atomically so the snapshot
+        // we use for preparation is consistent with the generation we
+        // record on commit.
+        let (bundleSnapshot, bundleGen) = bundleState.withLock { state -> ([String: OPA.Bundle], UInt64) in
+            if state.cachedBundlesGeneration != state.bundleGeneration {
+                var result: [String: OPA.Bundle] = [:]
+                result.reserveCapacity(state.bundleStorage.count)
+                for (name, storage) in state.bundleStorage {
+                    if case .success(let bundle) = storage {
+                        result[name] = bundle
+                    }
+                }
+                state.cachedBundles = result
+                state.cachedBundlesGeneration = state.bundleGeneration
+            }
+            return (state.cachedBundles, state.bundleGeneration)
+        }
+
+        // Decide what work to do under the query lock.
+        let action: PrepareAction = queryState.withLock { state in
+            let sameBundleGen = bundleGen == state.preparedBundleGeneration
+            let sameQueryGen = state.queryGeneration == state.preparedQueryGeneration
+            switch (sameBundleGen, sameQueryGen) {
+            case (true, true):
+                return .upToDate
+            case (true, false):
+                let unprepared = state.queries.subtracting(state.preparedQueries.keys)
+                if unprepared.isEmpty {
+                    return .upToDate
+                }
+                return .partial(queriesToPrepare: unprepared, queryGen: state.queryGeneration)
+            default:
+                return .full(
+                    queriesToPrepare: state.queries,
+                    bundleGen: bundleGen,
+                    queryGen: state.queryGeneration)
+            }
+        }
+
+        switch action {
+        case .upToDate:
+            // Nothing to do; mark "caught up" against the snapshot we just
+            // observed so subsequent fast-paths can hit the cache.
+            return queryState.withLock { state in
+                if bundleGen > state.preparedBundleGeneration {
+                    state.preparedBundleGeneration = bundleGen
+                }
+                return state.preparedQueries
+            }
+
+        case .partial(let queriesToPrepare, let queryGen):
+            let pq = try await Self.prepareQueries(
+                bundles: bundleSnapshot,
+                queries: queriesToPrepare,
+                customBuiltins: customBuiltins)
+            return queryState.withLock { state in
+                state.preparedQueries.merge(pq, uniquingKeysWith: { (_, new) in new })
+                // Only mark "caught up" to the generation we snapshotted.
+                if state.preparedQueryGeneration < queryGen {
+                    state.preparedQueryGeneration = queryGen
+                }
+                return state.preparedQueries
+            }
+
+        case .full(let queriesToPrepare, let bundleGen, let queryGen):
+            let pq = try await Self.prepareQueries(
+                bundles: bundleSnapshot,
+                queries: queriesToPrepare,
+                customBuiltins: customBuiltins)
+            return queryState.withLock { state in
+                state.preparedQueries = pq
+                // Only mark "caught up" to the generations we snapshotted.
+                // If a newer generation arrived mid-prepare, the next
+                // caller will see the mismatch and re-prepare.
+                if state.preparedBundleGeneration < bundleGen {
+                    state.preparedBundleGeneration = bundleGen
+                }
+                if state.preparedQueryGeneration < queryGen {
+                    state.preparedQueryGeneration = queryGen
+                }
+                return state.preparedQueries
+            }
+        }
     }
 
     /// Prepares all queries against the given set of bundles.
-    /// Runs outside actor isolation to avoid mutating-async-on-actor restrictions.
-    private nonisolated static func prepareQueries(
+    /// Runs without any lock held.
+    private static func prepareQueries(
         bundles: [String: OPA.Bundle],
         queries: Set<String>,
         customBuiltins: [String: Rego.Builtin] = [:]
@@ -282,12 +422,16 @@ extension OPA.Runtime {
         return pq
     }
 
-    // Fast-path read: actor-isolated but synchronous. Returns nil if caches are invalid.
+    /// Synchronous fast-path read. Returns nil if the prepared-query
+    /// cache is stale relative to the current bundle/query generations.
     private func cachedPreparedQuery(for query: String) -> OPA.Engine.PreparedQuery? {
-        guard self.bundleGeneration == self.preparedBundleGeneration,
-            self.queryGeneration == self.preparedQueryGeneration
-        else { return nil }
-        return self.preparedQueries[query]
+        let bundleGen = bundleState.withLock { $0.bundleGeneration }
+        return queryState.withLock { state in
+            guard bundleGen == state.preparedBundleGeneration,
+                state.queryGeneration == state.preparedQueryGeneration
+            else { return nil }
+            return state.preparedQueries[query]
+        }
     }
 
     /// `decision` generates a policy decision from a query, using
@@ -296,22 +440,24 @@ extension OPA.Runtime {
     /// Note: Once a query has been added with `addQuery`, or by calling
     /// `decision`, it will automatically be prepared and cached as
     /// bundles are updated, unless removed by a call to `removeQuery`.
-    public nonisolated func decision(
+    public func decision(
         _ query: String,
         input: AST.RegoValue,
         decisionID: String = UUID().uuidString
     ) async throws -> OPA.DecisionResult {
-        // Fast path: one brief actor hop to read the cache, then evaluate off-actor.
-        if let pq = await self.cachedPreparedQuery(for: query) {
+        // Fast path: locks are taken only briefly to read cached state,
+        // then the prepared query is evaluated without any lock held.
+        if let pq = self.cachedPreparedQuery(for: query) {
             let result = try await pq.evaluate(input: input)
             self.logger.info("decision: \(decisionID), result: \(result)")
             return OPA.DecisionResult(id: decisionID, result: result)
         }
 
-        // Slow path: prepare (actor hop + mutation), then evaluate off-actor.
+        // Slow path: prepare (off-lock), then evaluate.
         let pqs = try await self.prepare(adhocQueries: [query])
         guard let pq = pqs[query] else {
-            self.logger.error("decision: \(decisionID), error: Could not find prepared query for entrypoint \(query)")
+            self.logger.error(
+                "decision: \(decisionID), error: Could not find prepared query for entrypoint \(query)")
             throw RuntimeError(
                 code: .bundleUnpreparedError,
                 message: "Could not find prepared query for entrypoint \(query)")
@@ -337,29 +483,26 @@ extension OPA.Runtime {
     /// The initial active config is always emitted to bootstrap bundle
     /// workers, even if no config provider is present.
     public func run() async throws {
-        // Extract Sendable values while on the actor so they can be
-        // safely captured by child task closures.
-        let provider = self.configProvider
+        let provider = configState.withLock { $0.configProvider }
         let initialConfig = self.bootConfig
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             let (configStream, configContinuation) = AsyncStream<Result<OPA.Config, Error>>.makeStream()
 
             // Start the config provider polling loop (e.g., discovery) if present.
-            // It runs entirely off the actor and yields configs to the stream.
             if var provider {
                 let polling = Self.pollingConfig(for: provider)
                 self.logger.info("Starting config provider.")
                 group.addTask {
                     defer { configContinuation.finish() }
 
-                    var currentConfigGeneration = await self.configGeneration
+                    var currentConfigGeneration = self.configState.withLock { $0.configGeneration }
                     while !Task.isCancelled {
                         let result = await provider.load()
 
-                        // Attempt to update the active config. Only publish result on change.
-                        await self.updateConfig(result: result)
-                        let newConfigGeneration = await self.configGeneration
+                        // Attempt to update the active config. Only publish on change.
+                        self.updateConfig(result: result)
+                        let newConfigGeneration = self.configState.withLock { $0.configGeneration }
                         if currentConfigGeneration != newConfigGeneration {
                             configContinuation.yield(result)
                         }
@@ -391,8 +534,8 @@ extension OPA.Runtime {
             // Emit the initial config to bootstrap bundle workers.
             configContinuation.yield(.success(initialConfig))
             if provider == nil {
-                // No more configs coming — finish the stream so the
-                // config provider task exits after processing the initial config.
+                // No more configs coming — finish the stream so the bundle
+                // worker task exits after processing the initial config.
                 configContinuation.finish()
             }
 
@@ -436,7 +579,7 @@ extension OPA.Runtime {
                                         while !Task.isCancelled {
                                             // Attempt to fetch bundle. Update storage.
                                             let result = await loader.load()
-                                            await self.updateBundleResult(name: name, result: result)
+                                            self.updateBundleResult(name: name, result: result)
 
                                             // If our loader supports it, check long polling flag.
                                             if let httpLoader = loader as? OPA.HTTPBundleLoader {
@@ -458,7 +601,7 @@ extension OPA.Runtime {
                                         }
                                     } catch {
                                         // Something failed around setting up the bundle loader. Record the error.
-                                        await self.updateBundleResult(name: name, result: .failure(error))
+                                        self.updateBundleResult(name: name, result: .failure(error))
                                     }
                                     self.logger.info("Stopping bundle loader for bundle: \(name).")
                                 }
@@ -488,7 +631,7 @@ extension OPA.Runtime {
     /// Extracts the polling config from a known provider type.
     /// Currently specializes on ``DiscoveryConfigProvider``; extend as
     /// additional providers are added.
-    private nonisolated static func pollingConfig(
+    private static func pollingConfig(
         for provider: any OPA.ConfigProvider
     ) -> OPA.PollingConfig? {
         if let discovery = provider as? OPA.DiscoveryConfigProvider {
@@ -501,48 +644,47 @@ extension OPA.Runtime {
 // MARK: - Config Loading
 
 extension OPA.Runtime {
-    /// Updates the active config on the actor.
-    /// Tracks state of last config polling attempt.
+    /// Updates the active config under the config lock and tracks the
+    /// state of the last config polling attempt.
     ///
-    /// Called from the config polling loops after an off-actor fetch completes.
-    /// The actor hop is brief.
+    /// Called from the config polling loop after an off-lock fetch
+    /// completes. The critical section is short — only dictionary/enum
+    /// comparisons and a small struct write.
     private func updateConfig(
         result: Result<OPA.Config, any Swift.Error>
     ) {
-        // Deduplicate — skip if the result hasn't meaningfully changed.
-        let existing = self.lastestConfig
-        switch (existing, result) {
-        case (.success(let old), .success(let new))
-        where old == new:
-            self.logger.debug("Config not modified.")
-            return
-        case (.failure(let old), .failure(let new))
-        where old.localizedDescription == new.localizedDescription:
-            self.logger.debug("Config still failed to load with error: \(new).")
-            return
-        case (_, .success(let new)):
-            self.activeConfig = new  // Set new active config.
-            self.configGeneration += 1
-        default:
-            self.logger.debug("Updating config.")
-            break
+        configState.withLock { state in
+            // Deduplicate — skip if the result hasn't meaningfully changed.
+            switch (state.latestConfig, result) {
+            case (.success(let old), .success(let new))
+            where old == new:
+                self.logger.debug("Config not modified.")
+                return
+            case (.failure(let old), .failure(let new))
+            where old.localizedDescription == new.localizedDescription:
+                self.logger.debug("Config still failed to load with error: \(new).")
+                return
+            case (_, .success(let new)):
+                state.activeConfig = new
+                state.configGeneration &+= 1
+            default:
+                self.logger.debug("Updating config.")
+                break
+            }
+            state.latestConfig = result
         }
-        self.lastestConfig = result
     }
 }
 
 // MARK: - Bundle Loading
 
 extension OPA.Runtime {
-    /// Fetches a single bundle, based on its name and the OPA config.
+    /// Builds a single bundle loader from the configured loader-type list,
+    /// based on its name and the OPA config.
     ///
-    /// Declared `nonisolated` so that multiple fetches can proceed
-    /// concurrently in a task group without serializing on the actor.
-    /// Only accesses `self.httpClient`, which is also `nonisolated`.
-    ///
-    /// It will use the list of BundleLoader types configured at init
-    /// for the Runtime.
-    nonisolated func getBundleLoader(
+    /// Reads only immutable Runtime state, so it is safe to call from
+    /// any thread without locking.
+    func getBundleLoader(
         name: String,
         config: OPA.Config,
         logger: Logger
@@ -564,33 +706,33 @@ extension OPA.Runtime {
         return loader
     }
 
-    /// Applies a single bundle result to the actor's state
-    /// and bumps the bundle generation counter.
+    /// Applies a single bundle result to the runtime's bundle state and
+    /// bumps the bundle generation counter.
     ///
-    /// Called from bundle polling loops after an off-actor fetch completes.
-    /// The actor hop is brief — only synchronous dictionary updates.
+    /// Called from bundle polling loops after an off-lock fetch completes.
+    /// The critical section is short — only synchronous dictionary updates.
     private func updateBundleResult(
         name: String,
         result: Result<OPA.Bundle, any Swift.Error>
     ) {
-        // Deduplicate — skip if the result hasn't meaningfully changed.
-        let existing = self.bundleStorage[name]
-        switch (existing, result) {
-        case (.success(let old), .success(let new))
-        where old == new:
-            self.logger.debug("Bundle \(name) not modified.")
-            return
-        case (.failure(let old), .failure(let new))
-        where old.localizedDescription == new.localizedDescription:
-            self.logger.debug("Bundle \(name) still failed to load with error: \(new).")
-            return
-        default:
-            self.logger.debug("Updating bundle \(name).")
-            break
+        bundleState.withLock { state in
+            // Deduplicate — skip if the result hasn't meaningfully changed.
+            switch (state.bundleStorage[name], result) {
+            case (.success(let old), .success(let new))
+            where old == new:
+                self.logger.debug("Bundle \(name) not modified.")
+                return
+            case (.failure(let old), .failure(let new))
+            where old.localizedDescription == new.localizedDescription:
+                self.logger.debug("Bundle \(name) still failed to load with error: \(new).")
+                return
+            default:
+                self.logger.debug("Updating bundle \(name).")
+                break
+            }
+            state.bundleStorage[name] = result
+            state.bundleGeneration &+= 1
         }
-        // Update the bundle storage.
-        self.bundleStorage[name] = result
-        self.bundleGeneration &+= 1
     }
 }
 
