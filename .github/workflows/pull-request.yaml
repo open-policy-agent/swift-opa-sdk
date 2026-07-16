@@ -24,16 +24,13 @@ jobs:
       matrix:
         include:
           - os: macos-15
-            xcode: "16.2"
-            swift: "6.0.3"
-          - os: macos-15
             xcode: "16.4"
             swift: "6.1" # We can't go more modern than 6.1.0 for the 6.1 runner, due to Xcode version support.
           - os: macos-latest
             xcode: "26.2"
             swift: "6.2.3"
           - os: ubuntu-latest
-            swift: "6.0.3"
+            swift: "6.1"
           - os: ubuntu-latest
             swift: "6.2"
     env:

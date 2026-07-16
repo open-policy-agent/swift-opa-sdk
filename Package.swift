@@ -1,12 +1,12 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.1
 
 import PackageDescription
 
 let package = Package(
     name: "swift-opa-sdk",
     platforms: [
-        .macOS(.v13),
-        .iOS(.v16),
+        .macOS(.v15),
+        .iOS(.v18),
     ],
     products: [
         .library(
@@ -19,27 +19,17 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/open-policy-agent/swift-opa", branch: "main"),
+        .package(url: "https://github.com/open-policy-agent/swift-opa", from: "0.0.8"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.30.0"),
         .package(url: "https://github.com/swift-server/async-http-client", from: "1.21.0"),
-        // TODO: Swap for whatever our solution ends up being. This is not the most recent commit,
-        // but it is the last one that supports macOS 13 as a target.
+        // TODO: Swap for whatever our solution ends up being.
         // Placeholder until we decide how to handle tar.gz wrangling:
-        .package(
-            url: "https://github.com/tsolomko/SWCompression", revision: "5b57ac0fcd78ccd9f42644a4cf7a379ec3821ef1"),
-        // Pinned: BitByteData >=3.x bumps its minimum to macOS 14 and conflicts
-        // with SWCompression's macOS 11 target via swift-opa-sdk. 2.0.4 is the
-        // last known-good version that works with our macOS 13 platform floor.
-        .package(url: "https://github.com/tsolomko/BitByteData", exact: "2.0.4"),
+        .package(url: "https://github.com/tsolomko/SWCompression", from: "4.9.1"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.1"),
-        // Backports stdlib `Mutex<T>` (Synchronization module, macOS 15+) to
-        // our macOS 13 platform floor. One-line swap to the stdlib once the
-        // floor moves to macOS 15.
-        .package(url: "https://github.com/swhitty/swift-mutex.git", .upToNextMajor(from: "0.0.5")),
     ],
     targets: [
         .target(
@@ -76,10 +66,8 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "SwiftOPA", package: "swift-opa"),
                 .product(name: "SWCompression", package: "SWCompression"),
-                .product(name: "BitByteData", package: "BitByteData"),  // Direct dep here to silence warnings.
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Yams", package: "Yams"),
-                .product(name: "Mutex", package: "swift-mutex"),
             ],
             path: "Sources/Runtime"
         ),

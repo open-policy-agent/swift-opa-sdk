@@ -3,10 +3,10 @@ import AsyncHTTPClient
 import Config
 import Foundation
 import Logging
-import Mutex
 import Rego
 import RegoExtensions
 import SWCompression
+import Synchronization
 
 // TODO: Provide a rough equivalent of hooks.Hooks, once we have appropriate infrastructure to warrant it.
 // TODO: Port over the hacky bundle compilation via shell-out-to-OPA approach, and add a CLI flag to force SHA sum check before executing. (Maybe also a compile flag/trait?)
