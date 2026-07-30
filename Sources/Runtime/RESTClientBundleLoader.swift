@@ -53,6 +53,16 @@ extension OPA {
     /// in its responses, the loader will automatically disable long-polling,
     /// and will switch back to normal polling.
     ///
+    /// ## OPA IR Bundle Content Negotiation
+    ///
+    /// Every request sends an `Accept` header with a q-weighted list of
+    /// the bundle media types this loader can consume, ordered by preference:
+    /// the OPA IR bundle type first, then the OPA bundle type, then plain
+    /// gzip, and finally `*/*` as a catch-all.
+    ///
+    /// The `Accept` default is applied *before* the service config and
+    /// custom headers are merged in, so it can be overridden per-service.
+    ///
     /// ## Limitations
     ///
     /// - Bundle persistence for downloaded bundles is not yet implemented.
@@ -61,6 +71,15 @@ extension OPA {
     ///    [bundle-caching]: https://www.openpolicyagent.org/docs/management-bundles#caching
     ///    [bundle-long-polling]: https://www.openpolicyagent.org/docs/management-bundles#http-long-polling
     public struct RESTClientBundleLoader: HTTPBundleLoader, BundleLoader {
+        /// The `Accept` header value sent on every HTTP bundle request.
+        public static let defaultAcceptHeader =
+            [
+                "application/vnd.openpolicyagent.bundle.ir.v1+gzip;q=1.0",
+                "application/vnd.openpolicyagent.bundles;q=0.9",
+                "application/gzip;q=0.8",
+                "*/*;q=0.1",
+            ].joined(separator: ", ")
+
         /// The `bundle` resource name from the config.
         public let name: String
 
@@ -82,6 +101,9 @@ extension OPA {
         /// Note: These headers are set *before* credentials handlers,
         /// `ETag` caching, and long-polling headers are applied. Any
         /// conflicting header values will be overwritten.
+        ///
+        /// They are, however, applied *after* the default `Accept` header,
+        /// so a custom or service-config `Accept` value wins.
         public let customHeaders: [String: String]
 
         /// HTTPClient configuration to use when polling.
@@ -340,6 +362,9 @@ extension OPA {
 
             var httpRequest = HTTPClientRequest(url: self.fetchURL.absoluteString)
             httpRequest.method = .GET
+
+            httpRequest.headers.replaceOrAdd(name: "accept", value: Self.defaultAcceptHeader)
+
             for (k, v) in headers {
                 httpRequest.headers.replaceOrAdd(name: k, value: v)
             }
