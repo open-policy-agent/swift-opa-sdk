@@ -2,6 +2,8 @@
 
 import PackageDescription
 
+import class Foundation.ProcessInfo
+
 let package = Package(
     name: "swift-opa-sdk",
     platforms: [
@@ -20,7 +22,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/open-policy-agent/swift-opa", from: "0.0.8"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
@@ -96,3 +97,18 @@ let package = Package(
         ),
     ]
 )
+
+// If the `SWIFT_OPA_ALLOW_SWIFT_CRYPTO_BETA` environment variable is set
+// swift-opa-sdk will accept swift-crypto beta releases as a dependency.
+//
+// Note: A beta release can only be used if other packages in the dependency tree
+// that have a direct dependency on swift-crypto accept beta releases as well.
+if ProcessInfo.processInfo.environment["SWIFT_OPA_ALLOW_SWIFT_CRYPTO_BETA"] == nil {
+    package.dependencies += [
+        .package(url: "https://github.com/apple/swift-crypto.git", "1.0.0"..<"5.0.0")
+    ]
+} else {
+    package.dependencies += [
+        .package(url: "https://github.com/apple/swift-crypto.git", "1.0.0"..<"5.0.0-beta.max")
+    ]
+}
