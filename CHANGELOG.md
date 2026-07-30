@@ -5,9 +5,10 @@ project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## 0.0.1
 ### Swift OPA SDK Runtime
 
-The `SwiftOPASDK` library provides a high-level OPA policy runtime built on top of the [swift-opa](https://github.com/open-policy-agent/swift-opa) evaluator.
+The `SwiftOPASDK` library provides a high-level OPA policy runtime built on top of the [swift-opa](https://github.com/open-policy-agent/swift-opa) [Rego IR](https://www.openpolicyagent.org/docs/ir) evaluator.
 The `Runtime` type manages the full lifecycle of an OPA agent: loading bundles, refreshing them on schedule, applying configuration updates through the [Discovery API](https://www.openpolicyagent.org/docs/management-discovery), and exposing a simple evaluation interface to callers.
 
 ### Config management
@@ -38,4 +39,4 @@ This allows a Runtime instance to start with a minimal bootstrap configuration, 
 The `RegoExtensions` library target allows callers to extend the OPA evaluator
 with custom builtin functions implemented in Swift. The SDK ships YAML
 encoding/decoding builtins (`yaml.marshal`, `yaml.unmarshal`, `yaml.is_valid`)
-by default, using the Yams library.
+by default, using the [Yams](https://github.com/jpsim/Yams) library.
