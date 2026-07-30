@@ -72,12 +72,15 @@ extension OPA {
         /// - Parameters:
         ///   - bootConfig: The boot configuration containing a `discovery` section.
         ///   - bundleLoaders: Bundle loader types to try, in priority order.
+        ///   - headers: Custom HTTP headers to set on every discovery bundle
+        ///     request. Only reaches loaders that conform to ``OPA/HTTPBundleLoader``.
         public init(
             bootConfig: OPA.Config,
             bundleLoaders: [OPA.BundleLoader.Type] = [
                 OPA.DiskBasedBundleLoader.self,
                 OPA.RESTClientBundleLoader.self,
             ],
+            headers: [String: String]? = nil,
             logger: Logger? = nil
         ) throws {
             guard let discoveryConfig = bootConfig.discovery else {
@@ -108,13 +111,27 @@ extension OPA {
                 data: planData
             )
 
-            // Find the first compatible loader and construct it.
+            // Find the first compatible loader and construct it. Selection is
+            // driven solely by `compatibleWithDiscoveryConfig`.
             var constructed: (any OPA.BundleLoader)?
             for loaderType in bundleLoaders {
-                if loaderType.compatibleWithDiscoveryConfig(config: bootConfig) {
-                    constructed = try loaderType.init(discoveryConfig: bootConfig, logger: logger)
-                    break
+                guard loaderType.compatibleWithDiscoveryConfig(config: bootConfig) else {
+                    continue
                 }
+                if let httpLoaderType = loaderType as? any OPA.HTTPBundleLoader.Type {
+                    // FUTURE: the Runtime's `httpClientConfig` is not plumbed
+                    // through to discovery bundle loaders yet, so the loader falls back
+                    // to its own singleton default. We should replace this in the future.
+                    constructed = try httpLoaderType.init(
+                        discoveryConfig: bootConfig,
+                        etag: nil,
+                        headers: headers,
+                        httpClientConfig: nil,
+                        logger: logger)
+                } else {
+                    constructed = try loaderType.init(discoveryConfig: bootConfig, logger: logger)
+                }
+                break
             }
 
             guard let constructed else {

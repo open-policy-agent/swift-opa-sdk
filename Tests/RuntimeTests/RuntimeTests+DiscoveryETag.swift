@@ -356,7 +356,8 @@ struct PollingOptions: Sendable {
 func startDiscoveryRuntime(
     discovery: DiscoverySpec,
     bundles: [BundleSpec] = [],
-    polling: PollingOptions = PollingOptions()
+    polling: PollingOptions = PollingOptions(),
+    headers: [String: String]? = nil
 ) async throws -> (server: TestBundleServer, runtime: OPA.Runtime, runTask: Task<Void, Error>) {
     // Register bundle endpoints.
     var paths: [String: PathState] = [:]
@@ -408,7 +409,7 @@ func startDiscoveryRuntime(
         """
     let bootConfig = try JSONDecoder().decode(
         OPA.Config.self, from: Data(bootConfigJSON.utf8))
-    let runtime = try OPA.Runtime(config: bootConfig)
+    let runtime = try OPA.Runtime(config: bootConfig, headers: headers)
     let runTask = Task { try await runtime.run() }
     return (server, runtime, runTask)
 }
