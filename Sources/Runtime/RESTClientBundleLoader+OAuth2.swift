@@ -105,6 +105,11 @@ extension OPA {
 
             // Build a one-off HTTPClient for the token request,
             // inheriting allow_insecure_tls from the parent service.
+            //
+            // FUTURE: the loader's own `httpClientConfig` is not threaded in, so
+            // `.fixed` / `.tls` / `.configuration` sources never reach the token
+            // endpoint. It keeps using the global default HTTP client config plus
+            // a hardcoded 10-second deadline, matching the Go plugin.
             var tls = TLSConfiguration.makeClientConfiguration()
             tls.minimumTLSVersion = .tlsv12
             if service.allowInsecureTLS == true {
