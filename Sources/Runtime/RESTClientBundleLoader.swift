@@ -106,14 +106,11 @@ extension OPA {
         /// so a custom or service-config `Accept` value wins.
         public let customHeaders: [String: String]
 
-        /// HTTPClient configuration to use when polling.
+        /// The `HTTPClient.Configuration` used by the most recent `load()`.
+        /// Before the first load it holds the baseline derived from the source.
         public private(set) var httpClientConfig: HTTPClient.Configuration
 
-        /// The original HTTPClient.Configuration supplied at init, before
-        /// any per-call credential-driven mutation (e.g. mTLS). Kept so
-        /// every `load()` rebuilds from a clean baseline rather than
-        /// layering on top of the previous call's output.
-        private let baseHTTPClientConfig: HTTPClient.Configuration
+        private let httpClientConfigSource: HTTPClientConfigSource?
 
         /// Polling configuration.
         public let polling: PollingConfig?
@@ -139,6 +136,22 @@ extension OPA {
         }
 
         private let credentialLoader: CredentialLoader
+
+        private var clientTLSLoader: ClientTLSAuthPluginLoader? {
+            guard case .clientTLS(let loader) = self.credentialLoader else { return nil }
+            return loader
+        }
+
+        /// Static because `init` cannot read a computed property before every
+        /// stored property is initialized.
+        private static func baselineHTTPClientConfig(
+            for source: HTTPClientConfigSource?
+        ) -> HTTPClient.Configuration {
+            guard case .fixed(let injected) = source else {
+                return HTTPClient.Configuration.singletonConfiguration
+            }
+            return injected
+        }
 
         /// Joins a service base URL with a resource string that may contain
         /// a query string or fragment.
@@ -199,7 +212,7 @@ extension OPA {
             bundleResourceName: String,
             etag: String? = nil,
             headers: [String: String]? = nil,
-            httpClientConfig: HTTPClient.Configuration? = nil,
+            httpClientConfig: HTTPClientConfigSource? = nil,
             logger: Logger? = nil
         ) throws {
             guard let resource = config.bundles[bundleResourceName] else {
@@ -233,15 +246,15 @@ extension OPA {
             self.serviceConfig = service
             self.bundleConfig = resource
             self.customHeaders = headers ?? [:]
-            let httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
-            self.httpClientConfig = httpClientConfig
-            self.baseHTTPClientConfig = httpClientConfig
+            self.httpClientConfigSource = httpClientConfig
+            self.httpClientConfig = Self.baselineHTTPClientConfig(for: httpClientConfig)
             self.polling = resource.downloaderConfig.polling
             self.lastBundle = nil
             self.longPollingEnabled = false
             self.logger = logger ?? Logger(label: "swift-opa.bundle.downloader")
             self.credentialLoader = try Self.buildCredentialLoader(
                 credentials: service.credentials, bundleName: name)
+            self.warnIfClientTLSCredentialIgnored()
         }
 
         /// Constructor for loading from the `discovery` section of the config.
@@ -256,7 +269,7 @@ extension OPA {
             discoveryConfig config: OPA.Config,
             etag: String? = nil,
             headers: [String: String]? = nil,
-            httpClientConfig: HTTPClient.Configuration? = nil,
+            httpClientConfig: HTTPClientConfigSource? = nil,
             logger: Logger? = nil
         ) throws {
             guard let discovery = config.discovery else {
@@ -293,15 +306,15 @@ extension OPA {
                 signing: discovery.signing
             )
             self.customHeaders = headers ?? [:]
-            let httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
-            self.httpClientConfig = httpClientConfig
-            self.baseHTTPClientConfig = httpClientConfig
+            self.httpClientConfigSource = httpClientConfig
+            self.httpClientConfig = Self.baselineHTTPClientConfig(for: httpClientConfig)
             self.polling = discovery.downloaderConfig.polling
             self.lastBundle = nil
             self.longPollingEnabled = false
             self.logger = logger ?? Logger(label: "swift-opa.bundle.rest-client.discovery")
             self.credentialLoader = try Self.buildCredentialLoader(
                 credentials: service.credentials, bundleName: "discovery")
+            self.warnIfClientTLSCredentialIgnored()
         }
 
         /// Compatibility check against the OPA bundle config section.
@@ -350,6 +363,46 @@ extension OPA {
             }
         }
 
+        // MARK: - HTTP client configuration
+
+        /// Resolves the `HTTPClient.Configuration` for a single `load()`,
+        /// invoking the provider closure when the source carries one.
+        private func buildActiveHTTPClientConfig() async throws -> HTTPClient.Configuration {
+            switch self.httpClientConfigSource {
+            case .none:
+                guard let clientTLS = self.clientTLSLoader else {
+                    return HTTPClient.Configuration.singletonConfiguration
+                }
+                return try clientTLS.newHTTPClientConfig(
+                    service: self.serviceConfig, base: .singletonConfiguration)
+            case .fixed(let injected):
+                guard let clientTLS = self.clientTLSLoader else { return injected }
+                return try clientTLS.newHTTPClientConfig(service: self.serviceConfig, base: injected)
+            case .tls(let provider):
+                var clientConfig = HTTPClient.Configuration.singletonConfiguration
+                clientConfig.tlsConfiguration = try await provider()
+                return clientConfig
+            case .configuration(let provider):
+                return try await provider()
+            }
+        }
+
+        private func warnIfClientTLSCredentialIgnored() {
+            guard let clientTLS = self.clientTLSLoader else { return }
+            switch self.httpClientConfigSource {
+            case .none, .fixed:
+                return
+            case .tls, .configuration:
+                self.logger.warning(
+                    """
+                    Ignoring services['\(self.bundleConfig.service)'] credentials.client_tls: an \
+                    httpClientConfig provider closure owns TLS for bundle '\(self.name)', so \
+                    client_tls.cert=\(clientTLS.config.cert) is never read.
+                    """
+                )
+            }
+        }
+
         /// Loads a bundle from the remote source, returning either a
         /// successfully parsed OPA bundle, or an error.
         ///
@@ -369,44 +422,13 @@ extension OPA {
                 httpRequest.headers.replaceOrAdd(name: k, value: v)
             }
 
-            // Set authorization headers.
-            switch self.credentialLoader {
-            case .defaultNoAuth:
-                break
-            case .bearer(let loader):
-                self.logger.info("Preparing bundle request with bearer authentication")
-                do {
-                    try loader.prepare(req: &httpRequest)
-                } catch {
-                    return .failure(error)
-                }
-            case .clientTLS(let loader):
-                do {
-                    // `prepare` is a no-op for clientTLS; kept for symmetry.
-                    try loader.prepare(req: &httpRequest)
-                    // Rebuild the effective HTTPClient.Configuration from
-                    // the immutable baseline on every call. The loader's
-                    // internal cert cache makes this cheap when the on-disk
-                    // cert hasn't changed (SHA256-compared bytes reuse the
-                    // parsed cert chain / key).
-                    self.httpClientConfig = try loader.newHTTPClientConfig(
-                        service: self.serviceConfig,
-                        base: self.baseHTTPClientConfig
-                    )
-                } catch {
-                    return .failure(error)
-                }
-            case .oauth2(let loader):
-                self.logger.debug("Preparing bundle request with OAuth2 client credentials authentication")
-                do {
-                    try await loader.prepare(
-                        req: &httpRequest,
-                        service: self.serviceConfig,
-                        logger: self.logger
-                    )
-                } catch {
-                    return .failure(error)
-                }
+            // Config first, so a provider throw short-circuits before any
+            // network I/O (an OAuth2 token request included).
+            do {
+                self.httpClientConfig = try await self.buildActiveHTTPClientConfig()
+                try await self.prepareCredentials(req: &httpRequest)
+            } catch {
+                return .failure(error)
             }
 
             // Set If-None-Match header for ETag supporting servers.
@@ -485,6 +507,23 @@ extension OPA {
             } catch {
                 self.etag = ""
                 return .failure(error)
+            }
+        }
+
+        /// Applies the service's credential type to the outgoing request.
+        private func prepareCredentials(req: inout HTTPClientRequest) async throws {
+            switch self.credentialLoader {
+            case .defaultNoAuth:
+                break
+            case .bearer(let loader):
+                self.logger.info("Preparing bundle request with bearer authentication")
+                try loader.prepare(req: &req)
+            case .clientTLS(let loader):
+                // A no-op for clientTLS; kept for symmetry.
+                try loader.prepare(req: &req)
+            case .oauth2(let loader):
+                self.logger.debug("Preparing bundle request with OAuth2 client credentials authentication")
+                try await loader.prepare(req: &req, service: self.serviceConfig, logger: self.logger)
             }
         }
 

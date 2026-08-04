@@ -74,6 +74,9 @@ extension OPA {
         ///   - bundleLoaders: Bundle loader types to try, in priority order.
         ///   - headers: Custom HTTP headers to set on every discovery bundle
         ///     request. Only reaches loaders that conform to ``OPA/HTTPBundleLoader``.
+        ///   - httpClientConfig: Where the discovery bundle loader gets its
+        ///     HTTP client configuration. Only reaches loaders that conform to
+        ///     ``OPA/HTTPBundleLoader``.
         public init(
             bootConfig: OPA.Config,
             bundleLoaders: [OPA.BundleLoader.Type] = [
@@ -81,6 +84,7 @@ extension OPA {
                 OPA.RESTClientBundleLoader.self,
             ],
             headers: [String: String]? = nil,
+            httpClientConfig: HTTPClientConfigSource? = nil,
             logger: Logger? = nil
         ) throws {
             guard let discoveryConfig = bootConfig.discovery else {
@@ -119,14 +123,11 @@ extension OPA {
                     continue
                 }
                 if let httpLoaderType = loaderType as? any OPA.HTTPBundleLoader.Type {
-                    // FUTURE: the Runtime's `httpClientConfig` is not plumbed
-                    // through to discovery bundle loaders yet, so the loader falls back
-                    // to its own singleton default. We should replace this in the future.
                     constructed = try httpLoaderType.init(
                         discoveryConfig: bootConfig,
                         etag: nil,
                         headers: headers,
-                        httpClientConfig: nil,
+                        httpClientConfig: httpClientConfig,
                         logger: logger)
                 } else {
                     constructed = try loaderType.init(discoveryConfig: bootConfig, logger: logger)

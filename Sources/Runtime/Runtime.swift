@@ -77,8 +77,9 @@ extension OPA {
         /// overwrite any conflicting values.
         public let headers: [String: String]?
 
-        /// HTTP client configuration to use in bundle loaders.
-        public let httpClientConfig: HTTPClient.Configuration?
+        /// Where HTTP-based bundle/discovery loader get their
+        /// `HTTPClient.Configuration`. Forwarded verbatim.
+        public let httpClientConfig: HTTPClientConfigSource?
 
         /// Bundle loader type list to use for loading bundles. Ordered by priority.
         private let bundleLoaders: [BundleLoader.Type]
@@ -203,7 +204,7 @@ extension OPA {
         ///   - instanceID: An identifier for this Runtime instance.
         ///   - headers: Custom HTTP headers to set on every request made by
         ///     HTTP-based bundle loaders, including the discovery bundle loader.
-        ///   - httpClientConfig: The HTTP client configuration to use for bundle loaders.
+        ///   - httpClientConfig: Where bundle loaders get their HTTP client configuration.
         ///   - bundleLoaders: BundleLoader types to use, in priority order.
         ///   - configProvider: An optional config provider. If nil and `config.discovery`
         ///     is set, a ``DiscoveryConfigProvider`` is created automatically.
@@ -214,7 +215,7 @@ extension OPA {
             queries: [String]? = nil,
             instanceID: String = UUID().uuidString,
             headers: [String: String]? = nil,
-            httpClientConfig: HTTPClient.Configuration? = nil,
+            httpClientConfig: HTTPClientConfigSource? = nil,
             bundleLoaders: [BundleLoader.Type] = [
                 OPA.DiskBasedBundleLoader.self,
                 OPA.RESTClientBundleLoader.self,
@@ -228,7 +229,7 @@ extension OPA {
             self.customBuiltins = SDKBuiltinFuncs.sdkDefaultBuiltins.merging(
                 customBuiltins, uniquingKeysWith: { (_, new) in new })
             self.headers = headers
-            self.httpClientConfig = httpClientConfig ?? HTTPClient.Configuration.singletonConfiguration
+            self.httpClientConfig = httpClientConfig
             self.bundleLoaders = bundleLoaders
             self.logger = logger ?? Logger(label: "swift-opa.runtime:\(instanceID)")
 
@@ -237,13 +238,11 @@ extension OPA {
             if let configProvider {
                 resolvedProvider = configProvider
             } else if config.discovery != nil {
-                // FUTURE: `self.httpClientConfig` is not threaded through to the
-                // discovery bundle loader yet. It still falls back to its own
-                // singleton default. We should plumb that in here in the future.
                 resolvedProvider = try DiscoveryConfigProvider(
                     bootConfig: config,
                     bundleLoaders: bundleLoaders,
-                    headers: headers)
+                    headers: headers,
+                    httpClientConfig: self.httpClientConfig)
             } else {
                 resolvedProvider = nil
             }
@@ -692,7 +691,10 @@ extension OPA.Runtime {
     /// Builds a single bundle loader from the configured loader-type list,
     /// based on its name and the OPA config.
     ///
-    /// Loader selection is driven by the compatibleWithConfig check.
+    /// Loader selection is driven by the compatibleWithConfig check. Once a
+    /// type is selected, loaders conforming to ``OPA/HTTPBundleLoader`` are
+    /// built through the HTTP initializer so injected values like ``headers``
+    /// and ``httpClientConfig`` reach them.
     ///
     /// Reads only immutable Runtime state, so it is safe to call from
     /// any thread without locking.
@@ -707,14 +709,12 @@ extension OPA.Runtime {
                 continue
             }
             if let httpLoaderType = loaderType as? any OPA.HTTPBundleLoader.Type {
-                // FUTURE: `self.httpClientConfig` is not threaded through here
-                // yet, so the loader falls back to its own singleton default.
                 bundleLoader = try httpLoaderType.init(
                     config: config,
                     bundleResourceName: name,
                     etag: nil,
                     headers: self.headers,
-                    httpClientConfig: nil,
+                    httpClientConfig: self.httpClientConfig,
                     logger: logger)
             } else {
                 bundleLoader = try loaderType.init(config: config, bundleResourceName: name, logger: logger)
@@ -782,7 +782,7 @@ extension OPA.Runtime {
         queries: [String]? = nil,
         instanceID: String = UUID().uuidString,
         headers: [String: String]? = nil,
-        httpClientConfig: HTTPClient.Configuration? = nil,
+        httpClientConfig: OPA.HTTPClientConfigSource? = nil,
         bundleLoaders: [OPA.BundleLoader.Type] = [
             OPA.DiskBasedBundleLoader.self,
             OPA.RESTClientBundleLoader.self,

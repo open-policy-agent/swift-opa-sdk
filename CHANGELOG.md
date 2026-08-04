@@ -5,6 +5,30 @@ project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+### Breaking API changes
+
+The `httpClientConfig:` parameter on `OPA.Runtime.init`, `OPA.DiscoveryConfigProvider.init`, `OPA.RESTClientBundleLoader.init`, and the `OPA.HTTPBundleLoader` protocol requirements changed type from `HTTPClient.Configuration?` to the new `OPA.HTTPClientConfigSource?` type.
+
+If you were using that parameter previously with a config value, you can wrap it with the `.fixed` enum case constructor: `httpClientConfig: .fixed(myConfiguration)`.
+
+### Bundle loading: closure-based HTTP client / TLS configuration
+
+`OPA.HTTPClientConfigSource` supports two ways to use closures to control your TLS or HTTPClient configuration:
+
+- `.tls(OPA.TLSConfigurationProvider)`: `@Sendable () async throws -> TLSConfiguration`.
+  The result becomes the `tlsConfiguration` value of the global default HTTP client config that the loader will use.
+- `.configuration(OPA.HTTPClientConfigurationProvider)`: `@Sendable () async throws -> HTTPClient.Configuration`.
+  Supplies the whole configuration the loader should use.
+
+This makes rotating mTLS identities much easier: before this change, TLS material could only be supplied as a fixed value at construction, or read from cert/key file paths on disk via `credentials.client_tls`.
+
+Other notes:
+
+- TLS/Config results are used verbatim.
+- If the TLS/Config provider closure throws, that `load()` call will fail, and be retried later.
+- If using closure config sources, that closure owns all TLS configuration for the Runtime.
+- The OAuth2 token request still builds its own `HTTPClient` from the global default http client config, so it cannot be configured this way yet.
+
 ## 0.0.1
 ### Swift OPA SDK Runtime
 

@@ -1,5 +1,6 @@
 import AST
 import Foundation
+import Logging
 import Rego
 import Runtime
 import Testing
@@ -199,7 +200,9 @@ public func makeETagTestConfigWithLongPolling(
 public func makeRESTClientBundleLoader(
     configJSON: String,
     bundleName: String = "test",
-    etag: String? = nil
+    etag: String? = nil,
+    httpClientConfig: OPA.HTTPClientConfigSource? = nil,
+    logger: Logger? = nil
 ) throws -> OPA.RESTClientBundleLoader {
     TestLogging.ensureBootstrapped()
     let config = try JSONDecoder().decode(OPA.Config.self, from: configJSON.data(using: .utf8)!)
@@ -208,6 +211,7 @@ public func makeRESTClientBundleLoader(
         bundleResourceName: bundleName,
         etag: etag,
         headers: nil,
-        httpClientConfig: nil
+        httpClientConfig: httpClientConfig,
+        logger: logger
     )
 }
