@@ -5,6 +5,10 @@ project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## 0.0.2
+
+This release includes bugfixes, as well as some powerful new functionality for configuring bundle loaders.
+
 ### Breaking API changes
 
 The `httpClientConfig:` parameter on `OPA.Runtime.init`, `OPA.DiscoveryConfigProvider.init`, `OPA.RESTClientBundleLoader.init`, and the `OPA.HTTPBundleLoader` protocol requirements changed type from `HTTPClient.Configuration?` to the new `OPA.HTTPClientConfigSource?` type.
@@ -28,6 +32,13 @@ Other notes:
 - If the TLS/Config provider closure throws, that `load()` call will fail, and be retried later.
 - If using closure config sources, that closure owns all TLS configuration for the Runtime.
 - The OAuth2 token request still builds its own `HTTPClient` from the global default http client config, so it cannot be configured this way yet.
+
+### Miscellaneous
+
+ - fix(runtime): Plumb custom headers through to spawned bundle loaders. (#47) by @philipaconrad
+ - feat(bundles): Add `Accept` header for IR-format bundles. (#46) by @philipaconrad
+deps: Update to Swift Crypto 5.0.0 (#45) by @philipaconrad
+
 
 ## 0.0.1
 ### Swift OPA SDK Runtime
