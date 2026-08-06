@@ -95,6 +95,21 @@ public func waitForBundleLoad(
     return nil
 }
 
+/// Polls `condition` until it returns true or the timeout elapses. Returns
+/// whether the condition was satisfied (checked once more at the deadline).
+public func waitUntil(
+    timeout: Duration = .seconds(2),
+    pollInterval: Duration = .milliseconds(20),
+    _ condition: @Sendable () -> Bool
+) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if condition() { return true }
+        try? await Task.sleep(for: pollInterval)
+    }
+    return condition()
+}
+
 /// Unwrap a successful bundle result or fail the test.
 public func requireBundleLoadSuccess(
     _ result: Result<OPA.Bundle, Error>,
