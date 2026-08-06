@@ -50,6 +50,8 @@ extension OPA.Bundle {
             guard te.info.type == .regular else { continue }
 
             let bundlePath = formatBundlePath(te.info.name)
+            // Reject entries whose path escapes the bundle root (e.g. "../escaped.rego").
+            try validateBundlePathWithinRoot(bundlePath)
             guard let bundlePathURL = URL(string: bundlePath) else {
                 throw OPA.Bundle.LoadError.unsupported("Could not create bundle path URL for \(bundlePath)")
             }
@@ -159,6 +161,8 @@ extension OPA.Bundle {
         case manifestParseError(URL, Swift.Error)
         case dataParseError(URL, Swift.Error)
         case dataEscapedRoot
+        /// A bundle file path escaped the bundle root (path traversal, e.g. "../escaped.rego").
+        case unsafeBundlePath(String)
         case unsupported(String)
     }
 }

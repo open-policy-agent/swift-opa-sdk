@@ -48,6 +48,8 @@ extension OPA.Bundle {
 
             // Format the path to match Go's Chrooted format
             let bundlePath = formatBundlePath(relativePath)
+            // Reject paths that would escape the bundle root.
+            try validateBundlePathWithinRoot(bundlePath)
             guard let bundlePathURL = URL(string: bundlePath) else {
                 throw OPA.Bundle.LoadError.unsupported("Could not create bundle path URL for \(bundlePath)")
             }
@@ -142,6 +144,17 @@ extension OPA.Bundle {
             // Build the full destination URL by appending the relative path
             let destinationURL = targetURL.appendingPathComponent(relativePath, isDirectory: false)
 
+            // Guard against path traversal: ensure the resolved destination stays
+            // within targetURL before creating any directories or writing. This
+            // protects bundles built in-memory or loaded from any source, not just
+            // tarballs, and runs before createDirectory so an escaping entry can't
+            // create parent directories outside the target.
+            let base = targetURL.standardizedFileURL
+            let dest = destinationURL.standardizedFileURL
+            guard dest.path == base.path || dest.path.hasPrefix(base.path + "/") else {
+                throw OPA.Bundle.LoadError.unsafeBundlePath(file.url.path)
+            }
+
             // Derive the parent directory and create it (+ any intermediates) if needed
             let directoryURL = destinationURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(
@@ -182,4 +195,31 @@ private func formatBundlePath(_ path: String) -> String {
         return "/" + path
     }
     return path
+}
+
+/// Verifies that a bundle-relative path does not escape the bundle root via
+/// `..` traversal, throwing ``OPA/Bundle/LoadError/unsafeBundlePath(_:)`` if it does.
+///
+/// We reject any path that normalizes to a location above its root.
+///
+/// The check is lexical (no filesystem or symlink resolution) so it
+/// cannot be fooled by a partially-written directory tree.
+///
+/// - Parameter path: A path that has already been through ``formatBundlePath(_:)``
+///   (has a leading `/`).
+func validateBundlePathWithinRoot(_ path: String) throws {
+    var depth = 0
+    for segment in path.split(separator: "/", omittingEmptySubsequences: true) {
+        switch segment {
+        case ".":
+            continue
+        case "..":
+            depth -= 1
+            if depth < 0 {
+                throw OPA.Bundle.LoadError.unsafeBundlePath(path)
+            }
+        default:
+            depth += 1
+        }
+    }
 }
