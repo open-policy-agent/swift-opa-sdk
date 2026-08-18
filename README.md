@@ -142,8 +142,8 @@ Currently, the `OPA.Runtime` only implements loading bundles from a subset of th
 |:---|:---|:---:|
 | No Auth (default) | - | :white_check_mark: |
 | [Bearer Token](https://www.openpolicyagent.org/docs/configuration#bearer-token) | `services[_].credentials.bearer` | :white_check_mark: |
-| [Client TLS Certificate](https://www.openpolicyagent.org/docs/configuration#client-tls-certificate) | `services[_].credentials.client_tls` | :x: |
-| [OAuth2 Client Credentials](https://www.openpolicyagent.org/docs/configuration#oauth2-client-credentials) | `services[_].credentials.oauth2` | :x: |
+| [Client TLS Certificate](https://www.openpolicyagent.org/docs/configuration#client-tls-certificate) | `services[_].credentials.client_tls` | :white_check_mark: |
+| [OAuth2 Client Credentials](https://www.openpolicyagent.org/docs/configuration#oauth2-client-credentials) | `services[_].credentials.oauth2` | :white_check_mark: |
 | [OAuth2 Client Credentials JWT authentication](https://www.openpolicyagent.org/docs/configuration#oauth2-client-credentials-jwt-authentication) | `services[_].credentials.oauth2` | :x: |
 | [OAuth2 JWT Bearer Grant Type](https://www.openpolicyagent.org/docs/configuration#oauth2-jwt-bearer-grant-type) | `services[_].credentials.oauth2` | :x: |
 | [AWS Signature](https://www.openpolicyagent.org/docs/configuration#aws-signature) | `services[_].credentials.s3_signing` | :x: |
