@@ -47,10 +47,10 @@ import SwiftOPASDK
 
 // Fetch config from YAML file on-disk.
 let configURL = URL(fileURLWithPath: "config.yaml", relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
-let config = try YAMLDecoder().decode(OPA.Config.self, from: Data(contentsOf: configURL)
+let config = try YAMLDecoder().decode(OPA.Config.self, from: Data(contentsOf: configURL))
 
 // Start the runtime, and launch its background worker tasks.
-let runtime = await OPA.Runtime(config: config)
+let runtime = try OPA.Runtime(config: config)
 let runtimeTask = Task { try await runtime.run() }
 
 // Make policy decisions at any time while run() is active.
