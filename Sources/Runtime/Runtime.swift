@@ -525,7 +525,7 @@ extension OPA.Runtime {
 
             // Start the config provider polling loop (e.g., discovery) if present.
             if var provider {
-                let polling = Self.pollingConfig(for: provider)
+                let polling = provider.pollingConfig()
                 self.logger.info("Starting config provider.")
                 group.addTask {
                     defer { configContinuation.finish() }
@@ -668,18 +668,6 @@ extension OPA.Runtime {
             // If a worker throws, the group cancels the siblings.
             for try await _ in group {}
         }
-    }
-
-    /// Extracts the polling config from a known provider type.
-    /// Currently specializes on ``DiscoveryConfigProvider``; extend as
-    /// additional providers are added.
-    private static func pollingConfig(
-        for provider: any OPA.ConfigProvider
-    ) -> OPA.PollingConfig? {
-        if let discovery = provider as? OPA.DiscoveryConfigProvider {
-            return discovery.pollingConfig()
-        }
-        return nil
     }
 }
 

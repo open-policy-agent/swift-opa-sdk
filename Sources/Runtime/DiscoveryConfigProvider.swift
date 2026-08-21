@@ -232,7 +232,7 @@ extension OPA {
 
         /// Returns the polling configuration for the discovery bundle,
         /// so that the Runtime's polling loop can honor it.
-        func pollingConfig() -> OPA.PollingConfig? {
+        public func pollingConfig() -> OPA.PollingConfig? {
             return discoveryConfig.downloaderConfig.polling
         }
 

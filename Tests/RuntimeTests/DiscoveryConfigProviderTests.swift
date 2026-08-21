@@ -1,5 +1,6 @@
 import AST
 import Foundation
+import Logging
 import Rego
 import Testing
 
@@ -487,6 +488,86 @@ struct DiscoveryConfigProviderTests {
                 return
             }
             #expect(merged.labels["env"] == "staging")
+        }
+    }
+
+    // MARK: - Polling Config Tests
+
+    /// Covers `pollingConfig()` from the `ConfigProvider` protocol.
+    @Suite("PollingConfig")
+    struct PollingConfigTests {
+
+        init() {
+            TestLogging.ensureBootstrapped()
+        }
+
+        static func makeDiscoveryProvider() throws -> OPA.DiscoveryConfigProvider {
+            let mockID = MockBundleLoaderRegistry.shared.register(scripted: [])
+            // The registry entry outlives this helper intentionally; these
+            // tests never call load(), so no scripted results are consumed.
+            let json = LoadTests.bootConfigTemplate.replacingOccurrences(
+                of: "__MOCK_ID__", with: mockID)
+            let bootConfig = try JSONDecoder().decode(OPA.Config.self, from: Data(json.utf8))
+            return try OPA.DiscoveryConfigProvider(
+                bootConfig: bootConfig,
+                bundleLoaders: [OPA.MockBundleLoader.self]
+            )
+        }
+
+        /// A ConfigProvider that wraps a DiscoveryConfigProvider and forwards
+        /// its polling window. Under the original downcast logic, the Runtime
+        /// would fail to see this window and fall back to the 60–120s default.
+        struct ComposingProvider: OPA.ConfigProvider {
+            var inner: OPA.DiscoveryConfigProvider
+
+            init(config: OPA.Config, logger: Logging.Logger?) throws {
+                self.inner = try OPA.DiscoveryConfigProvider(config: config, logger: logger)
+            }
+
+            init(wrapping inner: OPA.DiscoveryConfigProvider) {
+                self.inner = inner
+            }
+
+            mutating func load() async -> Result<OPA.Config, any Swift.Error> {
+                await inner.load()
+            }
+
+            func pollingConfig() -> OPA.PollingConfig? {
+                inner.pollingConfig()
+            }
+        }
+
+        /// A ConfigProvider that overrides nothing, exercising the default.
+        struct BareProvider: OPA.ConfigProvider {
+            init(config: OPA.Config, logger: Logging.Logger?) throws {}
+            mutating func load() async -> Result<OPA.Config, any Swift.Error> {
+                .failure(RuntimeError(code: .internalError, message: "unused"))
+            }
+        }
+
+        @Test("DiscoveryConfigProvider surfaces its configured window")
+        func discoverySurfacesWindow() throws {
+            let provider = try Self.makeDiscoveryProvider()
+            let polling = provider.pollingConfig()
+            #expect(polling?.minDelaySeconds == 1)
+            #expect(polling?.maxDelaySeconds == 1)
+        }
+
+        @Test("Composing provider honors the inner window via protocol dispatch")
+        func composingProviderHonorsWindow() throws {
+            let inner = try Self.makeDiscoveryProvider()
+            let composed: any OPA.ConfigProvider = ComposingProvider(wrapping: inner)
+            let polling = composed.pollingConfig()
+            #expect(polling?.minDelaySeconds == 1)
+            #expect(polling?.maxDelaySeconds == 1)
+        }
+
+        @Test("Default pollingConfig returns nil for providers that don't override")
+        func defaultReturnsNil() throws {
+            let config = try JSONDecoder().decode(
+                OPA.Config.self, from: Data("{}".utf8))
+            let provider: any OPA.ConfigProvider = try BareProvider(config: config, logger: nil)
+            #expect(provider.pollingConfig() == nil)
         }
     }
 }
