@@ -25,6 +25,10 @@ extension OPA {
         /// Load (or re-load) the discovered configuration, based on the
         /// initial config and any existing state.
         mutating func load() async -> Result<OPA.Config, any Swift.Error>
+
+        /// The polling window the Runtime's config loop should honor between
+        /// loads. Returns nil to accept the Runtime's default window.
+        func pollingConfig() -> OPA.PollingConfig?
     }
 
     /// HTTPConfigProvider is a slightly more specialized protocol to allow greater
@@ -33,4 +37,10 @@ extension OPA {
         /// Used by the loader-managing task to determine whether to sleep or not between polls.
         func isLongPollingEnabled() -> Bool
     }
+}
+
+/// Default polling config for providers that don't specify one. Providers
+/// that compose another provider can forward to its `pollingConfig()` here.
+extension OPA.ConfigProvider {
+    public func pollingConfig() -> OPA.PollingConfig? { nil }
 }
