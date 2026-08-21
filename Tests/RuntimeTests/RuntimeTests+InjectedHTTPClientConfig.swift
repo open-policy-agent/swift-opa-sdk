@@ -525,6 +525,7 @@ extension OPA {
             etag: String?,
             headers: [String: String]?,
             httpClientConfig: OPA.HTTPClientConfigSource?,
+            httpClientCache: OPA.HTTPClientCache?,
             logger: Logger?
         ) throws {
             self.id = try Self.extractID(from: config)
@@ -538,6 +539,7 @@ extension OPA {
             etag: String?,
             headers: [String: String]?,
             httpClientConfig: OPA.HTTPClientConfigSource?,
+            httpClientCache: OPA.HTTPClientCache?,
             logger: Logger?
         ) throws {
             self.id = try Self.extractID(from: config)

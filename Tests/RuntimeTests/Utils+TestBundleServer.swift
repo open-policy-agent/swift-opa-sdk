@@ -135,6 +135,8 @@ final class TestBundleServer: @unchecked Sendable {
             .serverChannelOption(.backlog, value: 256)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
+                // Each accepted child channel is one TCP connection.
+                state.recordConnection()
                 let base: EventLoopFuture<Void> =
                     if let sslContext {
                         channel.pipeline.addHandler(NIOSSLServerHandler(context: sslContext))

@@ -43,6 +43,7 @@ extension OPA {
             etag: String?,
             headers: [String: String]?,
             httpClientConfig: OPA.HTTPClientConfigSource?,
+            httpClientCache: OPA.HTTPClientCache?,
             logger: Logger?) throws
 
         /// Constructor for loading a discovery bundle over HTTP.
@@ -55,6 +56,7 @@ extension OPA {
             etag: String?,
             headers: [String: String]?,
             httpClientConfig: OPA.HTTPClientConfigSource?,
+            httpClientCache: OPA.HTTPClientCache?,
             logger: Logger?) throws
 
         /// Used by the loader-managing task to determine whether to sleep or not between polls.
@@ -84,6 +86,7 @@ extension OPA.HTTPBundleLoader {
         etag: String?,
         headers: [String: String]?,
         httpClientConfig: OPA.HTTPClientConfigSource?,
+        httpClientCache: OPA.HTTPClientCache?,
         logger: Logger?
     ) throws {
         throw RuntimeError(code: .discoveryNotSupported, message: "Bundle loader does not support Discovery")

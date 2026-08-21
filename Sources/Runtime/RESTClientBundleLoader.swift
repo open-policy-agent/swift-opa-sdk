@@ -112,6 +112,12 @@ extension OPA {
 
         private let httpClientConfigSource: HTTPClientConfigSource?
 
+        /// Optional cache of long-lived `HTTPClient`s. When present, each
+        /// `load()` reuses an existing client keyed by service. When nil
+        /// (a directly-constructed loader) each `load()` uses an ephemeral
+        /// client.
+        private let httpClientCache: OPA.HTTPClientCache?
+
         /// Polling configuration.
         public let polling: PollingConfig?
 
@@ -213,6 +219,7 @@ extension OPA {
             etag: String? = nil,
             headers: [String: String]? = nil,
             httpClientConfig: HTTPClientConfigSource? = nil,
+            httpClientCache: OPA.HTTPClientCache? = nil,
             logger: Logger? = nil
         ) throws {
             guard let resource = config.bundles[bundleResourceName] else {
@@ -248,6 +255,7 @@ extension OPA {
             self.customHeaders = headers ?? [:]
             self.httpClientConfigSource = httpClientConfig
             self.httpClientConfig = Self.baselineHTTPClientConfig(for: httpClientConfig)
+            self.httpClientCache = httpClientCache
             self.polling = resource.downloaderConfig.polling
             self.lastBundle = nil
             self.longPollingEnabled = false
@@ -270,6 +278,7 @@ extension OPA {
             etag: String? = nil,
             headers: [String: String]? = nil,
             httpClientConfig: HTTPClientConfigSource? = nil,
+            httpClientCache: OPA.HTTPClientCache? = nil,
             logger: Logger? = nil
         ) throws {
             guard let discovery = config.discovery else {
@@ -308,6 +317,7 @@ extension OPA {
             self.customHeaders = headers ?? [:]
             self.httpClientConfigSource = httpClientConfig
             self.httpClientConfig = Self.baselineHTTPClientConfig(for: httpClientConfig)
+            self.httpClientCache = httpClientCache
             self.polling = discovery.downloaderConfig.polling
             self.lastBundle = nil
             self.longPollingEnabled = false
@@ -452,9 +462,11 @@ extension OPA {
                     longPollingTA = longPollTimeout
                 }
 
-                // Create a one-off HTTPClient, and shut it down when we're done.
-                return try await HTTPClient.withHTTPClient(
-                    eventLoopGroup: .singletonMultiThreadedEventLoopGroup,
+                // Reuse a warm HTTPClient from the cache when one is present,
+                // otherwise fall back to a one-off client for this request.
+                return try await OPA.HTTPClientCache.withClient(
+                    cache: self.httpClientCache,
+                    service: self.bundleConfig.service,
                     configuration: self.httpClientConfig,
                     backgroundActivityLogger: nil,
                     { httpClient in
