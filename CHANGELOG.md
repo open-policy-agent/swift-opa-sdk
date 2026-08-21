@@ -5,6 +5,10 @@ project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## 0.0.3
+
+This release fixes several bugs around bundle loading and error handling, and adds HTTP client caching to the `Runtime` for better connection reuse during bundle loading.
+
 ### HTTP connection reuse across bundle polls
 
 HTTP-based bundle loaders now share a per-service cache of long-lived `HTTPClient`s (`OPA.HTTPClientCache`), so that TCP/TLS connections stay warm across polls and are reused when fetching bundles from the same service. Previously every `load()` call built a fresh `HTTPClient` and tore it down immediately after the call, paying a new TCP + TLS handshake on every poll.
@@ -23,6 +27,16 @@ Note: the OAuth2 token request is not yet pooled (it still uses a one-off `HTTPC
 The `OPA.HTTPBundleLoader` protocol initializers gained a required `httpClientCache: OPA.HTTPClientCache?` parameter (on both the bundle and the discovery initializer). Types conforming to `OPA.HTTPBundleLoader` must add this parameter to their initializers.
 
 The more basic `OPA.BundleLoader` protocol is unchanged, so custom non-HTTP bundle loaders are unaffected.
+
+## Miscellaneous
+
+ - Runtime: Fix bundle loading / config provider error comparison logic. (#55) authored by @philipaconrad
+ - Runtime+ConfigProvider: Expose `pollingConfig` in the protocol. (#54) authored by @philipaconrad
+ - Runtime: Add `HTTPClient` caching for connection pooling. (#53) authored by @philipaconrad
+ - SwiftOPASDK: Export symbols in main library product + fix README examples (#52) authored by @philipaconrad
+ - fix(README): Update the supported bundle loader authentication options. (#51) authored by @philipaconrad
+ - fix(bundles): Prevent path traversal attacks. (#50) authored by @philipaconrad
+
 
 ## 0.0.2
 
