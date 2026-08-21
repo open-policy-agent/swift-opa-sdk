@@ -691,7 +691,7 @@ extension OPA.Runtime {
                 self.logger.debug("Config not modified.")
                 return
             case (.failure(let old), .failure(let new))
-            where old.localizedDescription == new.localizedDescription:
+            where String(describing: old) == String(describing: new):
                 self.logger.debug("Config still failed to load with error: \(new).")
                 return
             case (_, .success(let new)):
@@ -770,7 +770,7 @@ extension OPA.Runtime {
                 self.logger.debug("Bundle \(name) not modified.")
                 return
             case (.failure(let old), .failure(let new))
-            where old.localizedDescription == new.localizedDescription:
+            where String(describing: old) == String(describing: new):
                 self.logger.debug("Bundle \(name) still failed to load with error: \(new).")
                 return
             default:
