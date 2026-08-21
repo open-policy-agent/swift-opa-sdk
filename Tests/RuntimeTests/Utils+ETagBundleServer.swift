@@ -89,6 +89,9 @@ final class ServerState: @unchecked Sendable {
     private var _paths: [String: PathState]
     private var _requests: [ReceivedRequest] = []
     private let _isSinglePath: Bool
+    /// Count of accepted child channels, i.e. distinct TCP connections. Used
+    /// by connection-reuse tests to assert that polls share one connection.
+    private var _connectionCount = 0
 
     /// Multi-path initializer.
     init(paths: [String: PathState]) {
@@ -121,6 +124,13 @@ final class ServerState: @unchecked Sendable {
 
     func recordRequest(_ r: ReceivedRequest) {
         lock.withLock { _requests.append(r) }
+    }
+
+    /// Number of distinct TCP connections accepted so far.
+    var connectionCount: Int { lock.withLock { _connectionCount } }
+
+    func recordConnection() {
+        lock.withLock { _connectionCount += 1 }
     }
 
     func requests(forURIPrefix prefix: String) -> [ReceivedRequest] {

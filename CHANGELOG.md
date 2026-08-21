@@ -5,6 +5,25 @@ project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+### HTTP connection reuse across bundle polls
+
+HTTP-based bundle loaders now share a per-service cache of long-lived `HTTPClient`s (`OPA.HTTPClientCache`), so that TCP/TLS connections stay warm across polls and are reused when fetching bundles from the same service. Previously every `load()` call built a fresh `HTTPClient` and tore it down immediately after the call, paying a new TCP + TLS handshake on every poll.
+
+Cached clients are keyed by service and validated on each load against the resolved `HTTPClient.Configuration`. A changed configuration (for example, a rotated certificate) transparently evicts and rebuilds the client. Closure-based config sources (`.tls` / `.configuration`) are pooled too, as long as the configuration they return is unchanged between loads.
+
+New manual controls on `OPA.Runtime` let you force a rebuild after an out-of-band change to the HTTP config:
+
+- `evictCachedHTTPClient(forService:)`
+- `evictAllCachedHTTPClients()`
+
+Note: the OAuth2 token request is not yet pooled (it still uses a one-off `HTTPClient`).
+
+### Breaking API changes
+
+The `OPA.HTTPBundleLoader` protocol initializers gained a required `httpClientCache: OPA.HTTPClientCache?` parameter (on both the bundle and the discovery initializer). Types conforming to `OPA.HTTPBundleLoader` must add this parameter to their initializers.
+
+The more basic `OPA.BundleLoader` protocol is unchanged, so custom non-HTTP bundle loaders are unaffected.
+
 ## 0.0.2
 
 This release includes bugfixes, as well as some powerful new functionality for configuring bundle loaders.

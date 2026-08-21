@@ -85,6 +85,7 @@ extension OPA {
             ],
             headers: [String: String]? = nil,
             httpClientConfig: HTTPClientConfigSource? = nil,
+            httpClientCache: OPA.HTTPClientCache? = nil,
             logger: Logger? = nil
         ) throws {
             guard let discoveryConfig = bootConfig.discovery else {
@@ -128,6 +129,7 @@ extension OPA {
                         etag: nil,
                         headers: headers,
                         httpClientConfig: httpClientConfig,
+                        httpClientCache: httpClientCache,
                         logger: logger)
                 } else {
                     constructed = try loaderType.init(discoveryConfig: bootConfig, logger: logger)

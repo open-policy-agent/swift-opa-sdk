@@ -120,8 +120,10 @@ extension OPA {
 
             let deadline: NIODeadline = .now() + .seconds(Self.tokenRequestTimeoutSeconds)
 
-            return try await HTTPClient.withHTTPClient(
-                eventLoopGroup: .singletonMultiThreadedEventLoopGroup,
+            // The token endpoint uses a one-off, ephemeral client for now.
+            return try await OPA.HTTPClientCache.withClient(
+                cache: nil,
+                service: "oauth2-token",
                 configuration: clientConfig,
                 backgroundActivityLogger: nil
             ) { client in

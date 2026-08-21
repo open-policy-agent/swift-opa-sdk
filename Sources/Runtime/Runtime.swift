@@ -81,6 +81,13 @@ extension OPA {
         /// `HTTPClient.Configuration`. Forwarded verbatim.
         public let httpClientConfig: HTTPClientConfigSource?
 
+        /// Cache of long-lived `HTTPClient`s shared by all HTTP-based bundle
+        /// loaders (including the discovery loader), so TCP/TLS connections
+        /// stay warm across polls. Internal: consumers control it through
+        /// ``evictCachedHTTPClient(forService:)`` / ``evictAllCachedHTTPClients()``.
+        /// Shut down when `run()` returns.
+        let httpClientCache: OPA.HTTPClientCache
+
         /// Bundle loader type list to use for loading bundles. Ordered by priority.
         private let bundleLoaders: [BundleLoader.Type]
 
@@ -232,6 +239,8 @@ extension OPA {
             self.httpClientConfig = httpClientConfig
             self.bundleLoaders = bundleLoaders
             self.logger = logger ?? Logger(label: "swift-opa.runtime:\(instanceID)")
+            self.httpClientCache = OPA.HTTPClientCache(
+                logger: self.logger)
 
             // Build config provider.
             let resolvedProvider: (any OPA.ConfigProvider)?
@@ -242,7 +251,8 @@ extension OPA {
                     bootConfig: config,
                     bundleLoaders: bundleLoaders,
                     headers: headers,
-                    httpClientConfig: self.httpClientConfig)
+                    httpClientConfig: self.httpClientConfig,
+                    httpClientCache: self.httpClientCache)
             } else {
                 resolvedProvider = nil
             }
@@ -492,6 +502,21 @@ extension OPA.Runtime {
     /// The initial active config is always emitted to bootstrap bundle
     /// workers, even if no config provider is present.
     public func run() async throws {
+        // Shut down cached HTTP clients on every exit path (normal return,
+        // thrown error, or cancellation). `defer` cannot await, so we bracket
+        // the worker group explicitly.
+        do {
+            try await self.runWorkerGroup()
+        } catch {
+            await self.httpClientCache.shutdownAll()
+            throw error
+        }
+        await self.httpClientCache.shutdownAll()
+    }
+
+    /// Runs the config-provider polling task and the bundle-worker managing
+    /// task as a group, blocking until the enclosing task is cancelled.
+    private func runWorkerGroup() async throws {
         let provider = state.withLock { $0.configProvider }
         let initialConfig = self.bootConfig
 
@@ -566,6 +591,14 @@ extension OPA.Runtime {
                         currentWorkers.cancel()
                         await currentWorkers.value
                     }
+
+                    // Release the cached HTTP clients for services this config no
+                    // longer uses. This ensures we clean up unused HTTP clients.
+                    var referencedServices = Set(config.bundles.values.map { $0.service })
+                    if let discoveryService = config.discovery?.service {
+                        referencedServices.insert(discoveryService)
+                    }
+                    self.httpClientCache.retainOnly(services: referencedServices)
 
                     // Spawn new bundle downloaders as a group.
                     // The nested task here allows cancelling the entire
@@ -715,6 +748,7 @@ extension OPA.Runtime {
                     etag: nil,
                     headers: self.headers,
                     httpClientConfig: self.httpClientConfig,
+                    httpClientCache: self.httpClientCache,
                     logger: logger)
             } else {
                 bundleLoader = try loaderType.init(config: config, bundleResourceName: name, logger: logger)
@@ -762,6 +796,23 @@ extension OPA.Runtime {
 }
 
 public typealias DecisionIDGenerator = @Sendable () async throws -> String
+
+// MARK: - HTTP client cache control
+
+extension OPA.Runtime {
+    /// Evicts the cached HTTP client for `service`, forcing the next poll to
+    /// build a fresh one. Useful when a credential or certificate has rotated
+    /// out of band in a way the SDK cannot observe (e.g. an in-memory cert
+    /// supplied through a closure-based ``OPA/HTTPClientConfigSource``).
+    public func evictCachedHTTPClient(forService service: String) {
+        self.httpClientCache.evict(services: [service])
+    }
+
+    /// Evicts every cached HTTP client, forcing subsequent polls to rebuild.
+    public func evictAllCachedHTTPClients() {
+        self.httpClientCache.evictAll()
+    }
+}
 
 // MARK: - OPA.Runtime convenience initializers
 
