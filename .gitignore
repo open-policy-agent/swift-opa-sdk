@@ -13,6 +13,7 @@ DerivedData/
 Package.resolved
 .vscode
 /opa-capabilities.json
+/test-results
 
 
 ## Obj-C/Swift specific

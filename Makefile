@@ -39,6 +39,24 @@ build:
 build-release:
 	swift build -c release
 
+# CI-specific targets. `build-ci` builds the code and tests in one pass, and
+# `test-ci` (which depends on it) runs with `--skip-build`. Test artifacts are
+# written outside `.build` so they don't pollute the cached build directory.
+.PHONY: build-ci
+build-ci:
+	swift build --build-tests
+
+.PHONY: test-ci
+test-ci: build-ci
+	mkdir -p test-results
+	@if command -v openssl >/dev/null 2>&1; then \
+		echo "openssl detected on PATH; enabling OpenSSL-dependent tests"; \
+		SWIFT_OPA_OPENSSL_TESTS=1 swift test --skip-build --xunit-output test-results/junit.xml; \
+	else \
+		echo "openssl NOT found on PATH; OpenSSL-dependent tests will be skipped"; \
+		swift test --skip-build --xunit-output test-results/junit.xml; \
+	fi
+
 .PHONY: ensure-bindir
 ensure-bindir:
 ifeq ($(shell test -d "$(BINDIR)"; echo $$?),1)
