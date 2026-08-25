@@ -132,10 +132,12 @@ extension OPA {
                 let buffer = try await response.body.collect(upTo: maxBytes)
 
                 guard (200..<300).contains(response.status.code) else {
-                    throw RuntimeError(
-                        code: .internalError,
+                    throw BundleFetchError(
+                        code: .bundleLoadError,
                         message:
-                            "OAuth2 token endpoint returned \(response.status.code): \(String(buffer: buffer))"
+                            "OAuth2 token endpoint returned \(response.status.code): \(String(buffer: buffer))",
+                        httpStatus: Int(response.status.code),
+                        host: URL(string: config.tokenURL)?.host
                     )
                 }
 
@@ -144,27 +146,30 @@ extension OPA {
                     decoded = try JSONDecoder().decode(
                         TokenEndpointResponse.self, from: Data(buffer.readableBytesView))
                 } catch {
-                    throw RuntimeError(
-                        code: .internalError,
+                    throw BundleFetchError(
+                        code: .bundleLoadError,
                         message: "Failed to decode OAuth2 token endpoint response: \(error)",
-                        cause: error
+                        cause: error,
+                        host: URL(string: config.tokenURL)?.host
                     )
                 }
 
                 // Reject anything other than a bearer token. (Mirrors Go plugin behavior.)
                 guard decoded.tokenType.lowercased() == "bearer" else {
-                    throw RuntimeError(
-                        code: .internalError,
+                    throw BundleFetchError(
+                        code: .bundleLoadError,
                         message:
-                            "OAuth2 token endpoint returned unsupported token_type: \(decoded.tokenType)"
+                            "OAuth2 token endpoint returned unsupported token_type: \(decoded.tokenType)",
+                        host: URL(string: config.tokenURL)?.host
                     )
                 }
 
                 let token = decoded.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !token.isEmpty else {
-                    throw RuntimeError(
-                        code: .internalError,
-                        message: "OAuth2 token endpoint returned an empty access_token"
+                    throw BundleFetchError(
+                        code: .bundleLoadError,
+                        message: "OAuth2 token endpoint returned an empty access_token",
+                        host: URL(string: config.tokenURL)?.host
                     )
                 }
 

@@ -219,7 +219,10 @@ struct RuntimeHTTPBundleOAuth2Tests {
         var loader = try makeRESTClientBundleLoader(configJSON: configJSON)
 
         let result = await loader.load()
-        let _ = try requireBundleLoadFailure(result, context: "401 from token endpoint")
+        let error = try requireBundleLoadFailure(result, context: "401 from token endpoint")
+
+        // The token-endpoint status is exposed as a structured field.
+        #expect((error as? BundleFetchError)?.httpStatus == 401)
 
         // The bundle request must not have been attempted.
         let bundleRequests = bundleServer.state.requests.filter { $0.uri == "/bundles/bundle.tar.gz" }
