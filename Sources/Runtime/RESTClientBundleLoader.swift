@@ -481,15 +481,29 @@ extension OPA {
 
                         // Collect the full response body into a ByteBuffer.
                         let maxBytesLimit = 50 * 1024 * 1024  // 50 MB
-                        let body = try await response.body.collect(upTo: maxBytesLimit)
+                        let body: ByteBuffer
+                        do {
+                            body = try await response.body.collect(upTo: maxBytesLimit)
+                        } catch {
+                            throw BundleFetchError(
+                                code: .bundleLoadError,
+                                message:
+                                    "Bundle download on url \(self.fetchURL) failed reading response body: \(error)",
+                                cause: error,
+                                httpStatus: Int(response.status.code),
+                                host: self.fetchURL.host
+                            )
+                        }
 
                         if response.status.code == 304 {
                             guard let bundle = self.lastBundle else {
                                 return Result<OPA.Bundle, Error>.failure(
-                                    RuntimeError(
-                                        code: .internalError,
+                                    BundleFetchError(
+                                        code: .bundleLoadError,
                                         message:
-                                            "Bundle download failed. Server returned response code 304 Not Modified, but no prior bundle cached."
+                                            "Bundle download failed. Server returned response code 304 Not Modified, but no prior bundle cached.",
+                                        httpStatus: 304,
+                                        host: self.fetchURL.host
                                     ))
                             }
                             return .success(bundle)
@@ -497,18 +511,32 @@ extension OPA {
                         }
 
                         guard (200..<300).contains(response.status.code) else {
-                            throw RuntimeError(
-                                code: .internalError,
+                            throw BundleFetchError(
+                                code: .bundleLoadError,
                                 message:
-                                    "Bundle download on url \(self.fetchURL) failed with response code: \(response.status.code), body: \(String(buffer: body))"
+                                    "Bundle download on url \(self.fetchURL) failed with response code: \(response.status.code), body: \(String(buffer: body))",
+                                httpStatus: Int(response.status.code),
+                                host: self.fetchURL.host
                             )
                         }
 
                         // Convert ByteBuffer to Data.
                         let data = Data(body.readableBytesView)
 
-                        // Decode the tarball into an OPA.Bundle.
-                        let newBundle = try OPA.Bundle.decodeFromTarball(from: data)
+                        // Decode the tarball into an OPA.Bundle. Wrap decode
+                        // failures so the outer catch does not mislabel them as
+                        // transport errors.
+                        let newBundle: OPA.Bundle
+                        do {
+                            newBundle = try OPA.Bundle.decodeFromTarball(from: data)
+                        } catch {
+                            throw BundleFetchError(
+                                code: .bundleLoadError,
+                                message: "Failed to decode bundle from \(self.fetchURL): \(error)",
+                                cause: error,
+                                host: self.fetchURL.host
+                            )
+                        }
 
                         // Cache last bundle, so we can handle the "no changes case".
                         self.lastBundle = newBundle
@@ -516,9 +544,16 @@ extension OPA {
                         self.longPollingEnabled = isLongPollingSupported(headers: response.headers)
                         return .success(newBundle)
                     })
-            } catch {
+            } catch let error as any RuntimeFailure {
+                // Structured errors (HTTP status, 304, decode) already carry
+                // their code / status / host. Pass them through unchanged.
                 self.etag = ""
                 return .failure(error)
+            } catch {
+                // Anything else is a true transport failure (network, DNS,
+                // TLS, timeout) thrown before an HTTP response was available.
+                self.etag = ""
+                return .failure(BundleFetchError.transport(url: self.fetchURL, cause: error))
             }
         }
 

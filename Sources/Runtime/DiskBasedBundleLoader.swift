@@ -118,9 +118,10 @@ extension OPA {
                     } catch {
                         return .failure(
                             RuntimeError(
-                                code: .internalError,
+                                code: .bundleLoadError,
                                 message:
-                                    "bundle \(name) failed to load with error: \(error)"
+                                    "bundle \(name) failed to load with error: \(error)",
+                                cause: error
                             ))
                     }
                     // Directory not empty.
@@ -128,7 +129,12 @@ extension OPA {
                         let bundle = try Bundle.decodeFromDirectory(fromDir: self.fetchURL)
                         return .success(bundle)
                     } catch {
-                        return .failure(error)
+                        return .failure(
+                            RuntimeError(
+                                code: .bundleLoadError,
+                                message: "bundle \(name) failed to load from directory: \(error)",
+                                cause: error
+                            ))
                     }
                 } else {
                     do {
@@ -136,13 +142,18 @@ extension OPA {
                         let bundle = try Bundle.decodeFromTarball(from: bundleData)
                         return .success(bundle)
                     } catch {
-                        return .failure(error)
+                        return .failure(
+                            RuntimeError(
+                                code: .bundleLoadError,
+                                message: "bundle \(name) failed to load from tarball: \(error)",
+                                cause: error
+                            ))
                     }
                 }
             }
             return .failure(
                 RuntimeError(
-                    code: .internalError,
+                    code: .bundleTransportError,
                     message:
                         "bundle \(name) failed to load. No file or directory found."
                 ))
