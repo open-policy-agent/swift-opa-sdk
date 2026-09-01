@@ -88,6 +88,11 @@ extension OPA {
         /// Shut down when `run()` returns.
         let httpClientCache: OPA.HTTPClientCache
 
+        /// Multicast fan-out system that backs ``events(bufferingPolicy:)``.
+        /// It lives outside the `state` `Mutex` so that events can be yielded after
+        /// that mutex's lock is released. Finished on `deinit`.
+        private let eventHub = RuntimeEventHub()
+
         /// Bundle loader type list to use for loading bundles. Ordered by priority.
         private let bundleLoaders: [BundleLoader.Type]
 
@@ -266,6 +271,12 @@ extension OPA {
                     configProvider: resolvedProvider,
                     queries: initialQueries,
                     queryGeneration: initialQueries.isEmpty ? 0 : 1))
+        }
+
+        deinit {
+            // Calling finish on the hub ends every subscriber's `for await` loop,
+            // signalling that this Runtime (the event source) is gone.
+            eventHub.finish()
         }
     }
 }
@@ -502,6 +513,14 @@ extension OPA.Runtime {
     /// The initial active config is always emitted to bootstrap bundle
     /// workers, even if no config provider is present.
     public func run() async throws {
+        // Bracket this session with lifecycle events. The hub itself is not
+        // finished here — it lives until `deinit`, so a single subscription can
+        // observe every run/stop cycle. `runStopped` fires on any exit path
+        // (normal return, thrown error, or cancellation), after the worker
+        // group below has fully drained.
+        eventHub.yield(OPA.RuntimeEvent(source: .runtime, kind: .runStarted))
+        defer { eventHub.yield(OPA.RuntimeEvent(source: .runtime, kind: .runStopped)) }
+
         // Shut down cached HTTP clients on every exit path (normal return,
         // thrown error, or cancellation). `defer` cannot await, so we bracket
         // the worker group explicitly.
@@ -532,6 +551,8 @@ extension OPA.Runtime {
 
                     var currentConfigGeneration = self.state.withLock { $0.configGeneration }
                     while !Task.isCancelled {
+                        self.eventHub.yield(
+                            OPA.RuntimeEvent(source: .config, kind: .fetchStarted))
                         let result = await provider.load()
 
                         // Attempt to update the active config. Only publish on change.
@@ -610,40 +631,56 @@ extension OPA.Runtime {
                             for name in config.bundles.keys {
                                 self.logger.info("Starting bundle loader for bundle: \(name).")
                                 bundleGroup.addTask {
+                                    let source = OPA.RuntimeEvent.Source.bundle(name: name)
+
+                                    // Build the loader first. On setup failure,
+                                    // emit a paired `fetchStarted` + `failed` and
+                                    // stop — no fetch loop runs.
+                                    var loader: OPA.BundleLoader
                                     do {
-                                        var loader = try self.getBundleLoader(
+                                        loader = try self.getBundleLoader(
                                             name: name,
                                             config: config,
                                             logger: self.logger)
-                                        var longPollingEnabled = false
-                                        let polling = config.bundles[name]?.downloaderConfig.polling
+                                    } catch {
+                                        self.eventHub.yield(
+                                            OPA.RuntimeEvent(source: source, kind: .fetchStarted))
+                                        self.updateBundleResult(name: name, result: .failure(error))
+                                        self.logger.info("Stopping bundle loader for bundle: \(name).")
+                                        return
+                                    }
 
-                                        while !Task.isCancelled {
-                                            // Attempt to fetch bundle. Update storage.
-                                            let result = await loader.load()
-                                            self.updateBundleResult(name: name, result: result)
+                                    var longPollingEnabled = false
+                                    let polling = config.bundles[name]?.downloaderConfig.polling
 
-                                            // If our loader supports it, check long polling flag.
-                                            if let httpLoader = loader as? OPA.HTTPBundleLoader {
-                                                longPollingEnabled = httpLoader.isLongPollingEnabled()
-                                            }
+                                    while !Task.isCancelled {
+                                        // Each bundle fetch attempt will have a
+                                        // `fetchStarted` event, always followed by
+                                        // exactly one terminal event after the attempt.
+                                        self.eventHub.yield(
+                                            OPA.RuntimeEvent(source: source, kind: .fetchStarted))
 
-                                            // Sleep until next polling interval.
-                                            // If long-polling, the wait is happening in the loader, so skip this.
-                                            if !longPollingEnabled {
-                                                do {
-                                                    let sleepTime = Int64.random(
-                                                        in: (polling?.minDelaySeconds ?? 60)...(polling?.maxDelaySeconds
-                                                            ?? 120))
-                                                    try await Task.sleep(for: .seconds(sleepTime))
-                                                } catch {
-                                                    break  // Task was cancelled — exit cleanly.
-                                                }
+                                        // Attempt to fetch bundle. Update storage.
+                                        let result = await loader.load()
+                                        self.updateBundleResult(name: name, result: result)
+
+                                        // If our loader supports it, check long polling flag.
+                                        if let httpLoader = loader as? OPA.HTTPBundleLoader {
+                                            longPollingEnabled = httpLoader.isLongPollingEnabled()
+                                        }
+
+                                        // Sleep until next polling interval.
+                                        // If long-polling, the wait is happening in the loader, so skip this.
+                                        if !longPollingEnabled {
+                                            do {
+                                                let sleepTime = Int64.random(
+                                                    in: (polling?.minDelaySeconds ?? 60)...(polling?.maxDelaySeconds
+                                                        ?? 120))
+                                                try await Task.sleep(for: .seconds(sleepTime))
+                                            } catch {
+                                                break  // Task was cancelled — exit cleanly.
                                             }
                                         }
-                                    } catch {
-                                        // Something failed around setting up the bundle loader. Record the error.
-                                        self.updateBundleResult(name: name, result: .failure(error))
                                     }
                                     self.logger.info("Stopping bundle loader for bundle: \(name).")
                                 }
@@ -683,26 +720,29 @@ extension OPA.Runtime {
     private func updateConfig(
         result: Result<OPA.Config, any Swift.Error>
     ) {
-        state.withLock { state in
-            // Deduplicate — skip if the result hasn't meaningfully changed.
+        let kind: OPA.RuntimeEvent.Kind = state.withLock { state in
+            // Deduplicate storage. We skip the generation bump if the result
+            // hasn't meaningfully changed. The event is emitted regardless.
             switch (state.latestConfig, result) {
-            case (.success(let old), .success(let new))
-            where old == new:
+            case (.success(let old), .success(let new)) where old == new:
                 self.logger.debug("Config not modified.")
-                return
-            case (.failure(let old), .failure(let new))
-            where String(describing: old) == String(describing: new):
-                self.logger.debug("Config still failed to load with error: \(new).")
-                return
+                state.latestConfig = result
+                return .notModified
+            case (_, .failure(let err)):
+                self.logger.debug("Config failed to load with error: \(err).")
+                state.latestConfig = result
+                return .failed(
+                    code: Self.failureCode(err, fallback: .internalError),
+                    httpStatus: Self.failureHTTPStatus(err))
             case (_, .success(let new)):
+                self.logger.debug("Updating config.")
                 state.activeConfig = new
                 state.configGeneration &+= 1
-            default:
-                self.logger.debug("Updating config.")
-                break
+                state.latestConfig = result
+                return .updated(revision: nil)
             }
-            state.latestConfig = result
         }
+        self.eventHub.yield(OPA.RuntimeEvent(source: .config, kind: kind))
     }
 }
 
@@ -762,24 +802,58 @@ extension OPA.Runtime {
         name: String,
         result: Result<OPA.Bundle, any Swift.Error>
     ) {
-        state.withLock { state in
-            // Deduplicate — skip if the result hasn't meaningfully changed.
+        // We figure out the event kind under the lock, then emit the event
+        // after releasing the lock. This prevents accidentally holding the
+        // `state` Mutex across a yield.
+        let kind: OPA.RuntimeEvent.Kind = state.withLock { state in
+            // Deduplicate storage. We skip the generation bump if the result
+            // hasn't meaningfully changed. The event is emitted regardless.
             switch (state.bundleStorage[name], result) {
-            case (.success(let old), .success(let new))
-            where old == new:
+            case (.success(let old), .success(let new)) where old == new:
                 self.logger.debug("Bundle \(name) not modified.")
-                return
+                return .notModified
             case (.failure(let old), .failure(let new))
             where String(describing: old) == String(describing: new):
+                // Repeated identical failures: keep storage/generation the same,
+                // but report the attempt.
                 self.logger.debug("Bundle \(name) still failed to load with error: \(new).")
-                return
-            default:
+                return .failed(
+                    code: Self.failureCode(new, fallback: .bundleLoadError),
+                    httpStatus: Self.failureHTTPStatus(new))
+            case (_, .failure(let err)):
+                self.logger.debug("Updating bundle \(name) (failed).")
+                state.bundleStorage[name] = result
+                state.bundleGeneration &+= 1
+                return .failed(
+                    code: Self.failureCode(err, fallback: .bundleLoadError),
+                    httpStatus: Self.failureHTTPStatus(err))
+            case (_, .success(let new)):
                 self.logger.debug("Updating bundle \(name).")
-                break
+                state.bundleStorage[name] = result
+                state.bundleGeneration &+= 1
+                let revision = new.manifest.revision
+                return .updated(revision: revision.isEmpty ? nil : revision)
             }
-            state.bundleStorage[name] = result
-            state.bundleGeneration &+= 1
         }
+        self.eventHub.yield(OPA.RuntimeEvent(source: .bundle(name: name), kind: kind))
+    }
+}
+
+// MARK: - Fetch failure mapping
+
+extension OPA.Runtime {
+    /// The category code for a failed fetch. Uses `fallback` for
+    /// errors that do not carry a ``RuntimeFailure`` code.
+    fileprivate static func failureCode(
+        _ error: any Swift.Error,
+        fallback: RuntimeError.Code
+    ) -> RuntimeError.Code {
+        (error as? any RuntimeFailure)?.code ?? fallback
+    }
+
+    /// The HTTP status for a failed fetch, when one is available.
+    fileprivate static func failureHTTPStatus(_ error: any Swift.Error) -> Int? {
+        (error as? BundleFetchError)?.httpStatus
     }
 }
 
@@ -799,6 +873,49 @@ extension OPA.Runtime {
     /// Evicts every cached HTTP client, forcing subsequent polls to rebuild.
     public func evictAllCachedHTTPClients() {
         self.httpClientCache.evictAll()
+    }
+}
+
+// MARK: - Event stream
+
+extension OPA.Runtime {
+    /// A live, multicast stream of bundle and config fetch lifecycle events.
+    ///
+    /// Each call returns an independent subscription that receives every
+    /// ``OPA/RuntimeEvent`` from subscription time onward. All subscribers
+    /// see the same stream of events. A slow consumer does not affect other
+    /// subscriptions.
+    ///
+    /// A subscription spans the Runtime's whole lifetime: it delivers events
+    /// from subscription time until the Runtime is deallocated, across any
+    /// number of ``run()`` sessions. Subscribe once (even before the first
+    /// ``run()``) to capture every transition from creation to shutdown. The
+    /// stream finishes only on `deinit`, so a consumer's `for await` loop ending
+    /// signals the Runtime is gone. To detect a session stopping without ending
+    /// the subscription, break on a ``OPA/RuntimeEvent/Kind/runStopped`` event.
+    ///
+    /// ```swift
+    /// let runtime = try OPA.Runtime(config: myConfig)
+    /// // Subscribe synchronously before run() so the first runStarted (yielded
+    /// // before run() suspends) is not missed by a not-yet-scheduled task.
+    /// let events = runtime.events()
+    /// Task {
+    ///     for await event in events {
+    ///         print("\(event.source): \(event.kind)")
+    ///     }
+    /// }
+    /// try await runtime.run()
+    /// ```
+    ///
+    /// - Parameter bufferingPolicy: Per-subscriber buffering. Defaults to
+    ///   `.unbounded`, which guarantees a consumer that keeps up never misses an
+    ///   event. Pass a bounded policy (e.g. `.bufferingNewest(n)`) to cap memory
+    ///   for a consumer that may fall behind, at the cost of possibly dropping
+    ///   events.
+    public func events(
+        bufferingPolicy: AsyncStream<OPA.RuntimeEvent>.Continuation.BufferingPolicy = .unbounded
+    ) -> some (AsyncSequence<OPA.RuntimeEvent, Never> & Sendable) {
+        eventHub.subscribe(bufferingPolicy: bufferingPolicy)
     }
 }
 
