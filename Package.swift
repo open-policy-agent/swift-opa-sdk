@@ -21,7 +21,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/open-policy-agent/swift-opa", from: "0.0.8"),
+        .package(url: "https://github.com/open-policy-agent/swift-opa", from: "0.0.10"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),

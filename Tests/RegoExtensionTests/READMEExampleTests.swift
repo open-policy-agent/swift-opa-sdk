@@ -1,12 +1,11 @@
 import AST
 import Foundation
 import Rego
-import RegoExtensions
 import Testing
 
-// Exercises the OPA.Engine + SDK builtins integration described in the README:
-// create an engine with the SDK builtins registered, prepare a query, and
-// evaluate a policy that calls a yaml.* built-in.
+// Exercises the OPA.Engine + yaml.* integration: create an engine, prepare a
+// query, and evaluate a policy that calls a yaml.* built-in. Since swift-opa
+// >= 0.0.10 provides yaml.* natively, no custom builtins need to be registered.
 @Suite("READMEExampleTests")
 struct READMEExampleTests {
     @Test func testREADMEExample() async throws {
@@ -38,9 +37,7 @@ struct READMEExampleTests {
 
         var engine = OPA.Engine(
             bundles: ["test": bundle],
-            capabilities: nil,
-            customBuiltins: [:],
-            customSyncBuiltins: SDKBuiltinFuncs.sdkDefaultSyncBuiltins
+            capabilities: nil
         )
 
         let pq = try await engine.prepareForEvaluation(query: "data/test/allow")
