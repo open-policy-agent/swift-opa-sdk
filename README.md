@@ -64,17 +64,9 @@ Its APIs are inspired by OPA's [`sdk.OPA` type](https://pkg.go.dev/github.com/op
 
 ## RegoExtensions
 
-The `RegoExtensions` target provides built-in Rego functions not included in [swift-opa](https://github.com/open-policy-agent/swift-opa) itself.
-When using `OPA.Runtime` from the `SwiftOPASDK` product, these are registered automatically.
-If you use `OPA.Engine` directly, you can register them explicitly via the `customBuiltins` parameter.
-
-Currently provided builtins:
-
-| Rego name | Description |
-|:---|:---|
-| `yaml.is_valid` | Returns `true` if the input string is valid YAML |
-| `yaml.marshal` | Serializes a Rego value to a YAML string |
-| `yaml.unmarshal` | Deserializes a YAML string to a Rego value |
+The `RegoExtensions` target is the home for built-in Rego functions this SDK provides on top of
+[swift-opa](https://github.com/open-policy-agent/swift-opa). It currently ships no builtins of its
+own, and `SDKBuiltinFuncs.sdkDefaultBuiltins` returns an empty set.
 
 ### Adding RegoExtensions as a dependency
 
@@ -98,22 +90,11 @@ let package = Package(
 )
 ```
 
-### Example: customizing an Engine with YAML builtins
+### Example: registering your own custom builtins
 
-```swift
-import Rego
-import RegoExtensions
-
-let engine = OPA.Engine(
-    bundlePaths: [.init(path: "./bundles/authz.tar.gz", isDir: false)],
-    customBuiltins: SDKBuiltinFuncs.sdkDefaultBuiltins
-)
-
-let prepared = try await engine.prepareForEval(query: "data.authz.allow")
-let result = try await prepared.eval(input: .object(["user": .string("alice")]))
-```
-
-You can also merge the YAML builtins with your own custom builtins:
+If you use `OPA.Engine` directly, register any custom builtins via the `customBuiltins`
+parameter. You can merge `SDKBuiltinFuncs.sdkDefaultBuiltins` (currently empty) in as well so
+your code keeps picking up SDK builtins if any are added later:
 
 ```swift
 import Rego

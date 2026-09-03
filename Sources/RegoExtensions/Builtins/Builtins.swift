@@ -12,11 +12,7 @@ public enum SDKBuiltinFuncs {
 extension SDKBuiltinFuncs {
     /// The default set of builtins for this library.
     public static var sdkDefaultBuiltins: [String: Rego.BuiltinImpl] {
-        return [
-            "yaml.is_valid": .sync(SDKBuiltinFuncs.yamlIsValid),
-            "yaml.marshal": .sync(SDKBuiltinFuncs.yamlMarshal),
-            "yaml.unmarshal": .sync(SDKBuiltinFuncs.yamlUnmarshal),
-        ]
+        return [:]
     }
 
     /// Names of all SDK-provided builtins.
