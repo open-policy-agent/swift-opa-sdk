@@ -1,6 +1,6 @@
 # Swift-OPA-SDK
 
-[![Swift 6.1+](https://img.shields.io/badge/Swift-6.1+-blue.svg)](https://developer.apple.com/swift/)
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fopen-policy-agent%2Fswift-opa-sdk%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/open-policy-agent/swift-opa-sdk) [![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fopen-policy-agent%2Fswift-opa-sdk%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/open-policy-agent/swift-opa-sdk)
 
 Swift-OPA-SDK is a Swift package that extends [Swift OPA](https://github.com/open-policy-agent/swift-opa) with a higher-level interface and extended features.
 
