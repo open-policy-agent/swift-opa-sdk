@@ -1,0 +1,14 @@
+version: 1
+builder:
+  configs:
+    # No swift_version pin: apply to every SPI builder toolchain. Pinning to a
+    # version SPI doesn't run silently skips this config and builds no docs.
+    - documentation_targets:
+        - SwiftOPASDK
+        - Runtime
+        - Config
+      custom_documentation_parameters:
+        # Merge the targets into one site with SwiftOPASDK as the landing page,
+        # matching `make docs`. SPI already applies --transform-for-static-hosting
+        # and --hosting-base-path itself.
+        - '--enable-experimental-combined-documentation'
