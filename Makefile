@@ -1,6 +1,13 @@
 BINDIR ?= $(HOME)/bin
 OPA_BASE_CAPS_VERSION ?= v1.13.1
 
+# DocC documentation settings. SwiftOPASDK is the landing module, Runtime and
+# Config have the actual public symbols (SwiftOPASDK only re-exports them).
+# `DOCS_HOSTING_BASE_PATH` is the sub-path the static site is served under.
+DOCS_OUTPUT_DIR ?= .build/docs
+DOCS_TARGETS ?= --target SwiftOPASDK --target Runtime --target Config
+DOCS_HOSTING_BASE_PATH ?= swift-opa-sdk
+
 .PHONY: all
 all: fmt lint test build
 
@@ -75,6 +82,31 @@ generate:
 .PHONY: clean
 clean:
 	rm -rf .build
+
+# Generate a static-hosting DocC site combining the public SDK targets into
+# `$(DOCS_OUTPUT_DIR)`. Requires SWIFT_PREVIEW_DOCS so Package.swift pulls in
+# swift-docc-plugin. Override DOCS_HOSTING_BASE_PATH to match the serving path.
+.PHONY: docs
+docs:
+	SWIFT_PREVIEW_DOCS=1 swift package \
+		--allow-writing-to-directory "$(DOCS_OUTPUT_DIR)" \
+		generate-documentation \
+		--enable-experimental-combined-documentation \
+		$(DOCS_TARGETS) \
+		--transform-for-static-hosting \
+		--hosting-base-path "$(DOCS_HOSTING_BASE_PATH)" \
+		--output-path "$(DOCS_OUTPUT_DIR)"
+
+# Serve the Runtime docs locally with live reload. Combined docs aren't
+# supported in preview mode, so this previews a single target.
+.PHONY: docs-preview
+docs-preview:
+	SWIFT_PREVIEW_DOCS=1 swift package --disable-sandbox \
+		preview-documentation --target Runtime
+
+.PHONY: clean-docs
+clean-docs:
+	rm -rf "$(DOCS_OUTPUT_DIR)"
 
 .PHONY: generate-compliance-tests
 generate-compliance-tests:

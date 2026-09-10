@@ -98,6 +98,18 @@ let package = Package(
     ]
 )
 
+// Swift Package Index adds SPI_GENERATE_DOCS (https://github.com/SwiftPackageIndex/SwiftPackageIndex-Server/issues/2336)
+// when building documentation.
+let spiGenerateDocs = ProcessInfo.processInfo.environment["SPI_GENERATE_DOCS"] != nil
+
+// Conditionally add the swift-docc plugin only when previewing docs locally.
+// Preview with:
+// ```
+// SWIFT_PREVIEW_DOCS=1 swift package --disable-sandbox preview-documentation --target Runtime
+// ```
+let previewDocs = ProcessInfo.processInfo.environment["SWIFT_PREVIEW_DOCS"] != nil
+let addDoccPlugin = previewDocs || spiGenerateDocs
+
 // If the `SWIFT_OPA_ALLOW_SWIFT_CRYPTO_BETA` environment variable is set
 // swift-opa-sdk will accept swift-crypto beta releases as a dependency.
 //
@@ -111,4 +123,10 @@ if ProcessInfo.processInfo.environment["SWIFT_OPA_ALLOW_SWIFT_CRYPTO_BETA"] == n
     package.dependencies += [
         .package(url: "https://github.com/apple/swift-crypto.git", "1.0.0"..<"5.0.0-beta.max")
     ]
+}
+
+if addDoccPlugin {
+    package.dependencies.append(
+        .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.5.0")
+    )
 }
