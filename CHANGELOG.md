@@ -5,6 +5,18 @@ project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## 0.0.4
+
+This release introduces our new [DocC documentation generation](https://www.swift.org/documentation/docc/) setup, and includes some minor improvements to the `Runtime`'s error types.
+
+### Miscellaneous
+
+ - README: Add SPI badges for Swift version and platform support. (#64) authored by @philipaconrad
+ - builtins: Drop SDK impl of YAML builtins, use upstream's impl. (#62) authored by @philipaconrad
+ - ci: Add Github Actions caching + CI makefile targets. (#60) authored by @philipaconrad
+ - Runtime: Improve error types and codes for handling. (#59) authored by @philipaconrad
+
+
 ## 0.0.3
 
 This release fixes several bugs around bundle loading and error handling, and adds HTTP client caching to the `Runtime` for better connection reuse during bundle loading.
@@ -28,7 +40,7 @@ The `OPA.HTTPBundleLoader` protocol initializers gained a required `httpClientCa
 
 The more basic `OPA.BundleLoader` protocol is unchanged, so custom non-HTTP bundle loaders are unaffected.
 
-## Miscellaneous
+### Miscellaneous
 
  - Runtime: Fix bundle loading / config provider error comparison logic. (#55) authored by @philipaconrad
  - Runtime+ConfigProvider: Expose `pollingConfig` in the protocol. (#54) authored by @philipaconrad
