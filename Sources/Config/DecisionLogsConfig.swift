@@ -435,14 +435,15 @@ extension OPA {
                 resolvedUploadLimit = requestedUploadLimit
             }
 
-            // Resolve buffer size defaults
-            let resolvedBufferSizeBytes = reporting.bufferSizeLimitBytes ?? defaultBufferSizeLimitBytes
-            let resolvedBufferSizeEvents = reporting.bufferSizeLimitEvents ?? defaultBufferSizeLimitEvents
+            // Buffer-size fields are passed through unchanged. Their effective
+            // defaults (`defaultBufferSizeLimitEvents`, `defaultBufferSizeLimitBytes`)
+            // are applied at consumption time, keyed off the buffer type, so we do not
+            // set them here. `nil` means "unlimited / use the default".
 
             let resolvedReporting = try ReportingConfig(
                 bufferType: reporting.bufferType,
-                bufferSizeLimitBytes: resolvedBufferSizeBytes,
-                bufferSizeLimitEvents: resolvedBufferSizeEvents,
+                bufferSizeLimitBytes: reporting.bufferSizeLimitBytes,
+                bufferSizeLimitEvents: reporting.bufferSizeLimitEvents,
                 uploadSizeLimitBytes: resolvedUploadLimit,
                 minDelaySeconds: resolvedMinDelay,
                 maxDelaySeconds: resolvedMaxDelay,

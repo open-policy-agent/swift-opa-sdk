@@ -102,7 +102,7 @@ struct HTTPClientCacheTests {
 
         cache.retainOnly(services: ["keep"])
 
-        // The retained service reuses its client; the dropped one is rebuilt.
+        // The retained service reuses its client. The dropped one is rebuilt.
         let keepAgain = cache.client(service: "keep", configuration: HTTPClient.Configuration())
         let dropAgain = cache.client(service: "drop", configuration: HTTPClient.Configuration())
         #expect(keepAgain === keep, "retained service should keep its client")
@@ -125,11 +125,29 @@ struct HTTPClientCacheTests {
         do {
             let cache = OPA.HTTPClientCache()
             _ = cache.client(service: "svc", configuration: HTTPClient.Configuration())
-            // No explicit shutdown; the cache goes out of scope here and its
+            // No explicit shutdown. The cache goes out of scope here and its
             // deinit must shut the client down rather than tripping HTTPClient's
             // "not shut down before deinit" precondition.
         }
         // Give the detached shutdown a moment to complete.
         try await Task.sleep(for: .milliseconds(200))
+    }
+
+    // MARK: - withClient entry point (used by loaders + the decision-log uploader)
+
+    @Test("withClient reuses the cached client across calls for the same service")
+    func withClientReusesPooledClient() async throws {
+        let cache = OPA.HTTPClientCache()
+        // Capture the client handed to each `withClient` body. This is the exact
+        // API the decision-log uploader now uses per POST, so two uploads to the
+        // same service must land on one pooled client rather than one-off ones.
+        let first = try await OPA.HTTPClientCache.withClient(
+            cache: cache, service: "svc", configuration: config(connect: .seconds(5))
+        ) { $0 }
+        let second = try await OPA.HTTPClientCache.withClient(
+            cache: cache, service: "svc", configuration: config(connect: .seconds(5))
+        ) { $0 }
+        #expect(first === second, "withClient must reuse the pooled client for a service")
+        await cache.shutdownAll()
     }
 }

@@ -27,6 +27,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.30.0"),
         .package(url: "https://github.com/swift-server/async-http-client", from: "1.21.0"),
+        .package(url: "https://github.com/apple/swift-collections", from: "1.1.0"),
         // TODO: Swap for whatever our solution ends up being.
         // Placeholder until we decide how to handle tar.gz wrangling:
         .package(url: "https://github.com/tsolomko/SWCompression", from: "4.9.1"),
@@ -67,6 +68,7 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "SwiftOPA", package: "swift-opa"),
                 .product(name: "SWCompression", package: "SWCompression"),
+                .product(name: "DequeModule", package: "swift-collections"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Yams", package: "Yams"),
             ],
