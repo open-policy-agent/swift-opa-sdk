@@ -91,6 +91,10 @@ extension OPA {
         /// Bundle loader type list to use for loading bundles. Ordered by priority.
         private let bundleLoaders: [BundleLoader.Type]
 
+        /// Factory that selects and constructs bundle loaders from the configured
+        /// loader-type list and the injected HTTP inputs.
+        private let loaderFactory: OPA.BundleLoaderFactory
+
         public let logger: Logger
 
         // MARK: Mutable state (guarded by `state`)
@@ -240,6 +244,12 @@ extension OPA {
             self.bundleLoaders = bundleLoaders
             self.logger = logger ?? Logger(label: "swift-opa.runtime:\(instanceID)")
             self.httpClientCache = OPA.HTTPClientCache(
+                logger: self.logger)
+            self.loaderFactory = OPA.BundleLoaderFactory(
+                loaderTypes: bundleLoaders,
+                headers: headers,
+                httpClientConfig: self.httpClientConfig,
+                httpClientCache: self.httpClientCache,
                 logger: self.logger)
 
             // Build config provider.
@@ -529,149 +539,61 @@ extension OPA.Runtime {
         let initialConfig = self.bootConfig
 
         try await withThrowingTaskGroup(of: Void.self) { group in
-            let (configStream, configContinuation) = AsyncStream<Result<OPA.Config, Error>>.makeStream()
+            let (configStream, configContinuation) = AsyncStream<OPA.Config>.makeStream()
 
-            // Start the config provider polling loop (e.g., discovery) if present.
-            if var provider {
-                let polling = provider.pollingConfig()
-                self.logger.info("Starting config provider.")
-                group.addTask {
-                    defer { configContinuation.finish() }
-
-                    var currentConfigGeneration = self.state.withLock { $0.configGeneration }
-                    while !Task.isCancelled {
-                        let result = await provider.load()
-                        if case .failure(let error) = result {
-                            self.logger.error("Config provider load() failed: \(error)")
-                        }
-                        // Attempt to update the active config. Only publish on change.
-                        self.updateConfig(result: result)
-                        let newConfigGeneration = self.state.withLock { $0.configGeneration }
-                        if currentConfigGeneration != newConfigGeneration {
-                            configContinuation.yield(result)
-                        }
-                        currentConfigGeneration = newConfigGeneration
-
-                        let longPollingEnabled: Bool = {
-                            if let httpProvider = provider as? any OPA.HTTPConfigProvider {
-                                return httpProvider.isLongPollingEnabled()
-                            }
-                            return false
-                        }()
-
-                        if !longPollingEnabled {
-                            let sleepTime = Int64.random(
-                                in: (polling?.minDelaySeconds ?? 60)...(polling?.maxDelaySeconds ?? 120)
-                            )
-                            do {
-                                try await Task.sleep(for: .seconds(sleepTime))
-                            } catch {
-                                break
-                            }
-                        }
+            // Route each config update from the provider into Runtime state,
+            // forwarding the config to the bundle manager only when it actually
+            // changed. Only successful, changed configs reach the stream.
+            let configSink: OPA.ConfigUpdateSink = { update in
+                switch update {
+                case .updated(let config):
+                    if self.updateConfig(result: .success(config)) {
+                        configContinuation.yield(config)
                     }
-
-                    self.logger.info("Stopping config provider.")
+                case .failed(let error):
+                    self.logger.error("Config provider load() failed: \(error)")
+                    _ = self.updateConfig(result: .failure(error))
                 }
             }
 
-            // Emit the initial config to bootstrap bundle workers.
-            configContinuation.yield(.success(initialConfig))
-            if provider == nil {
+            // Emit the initial config first so it is unambiguously the bundle
+            // manager's first input, before any config the provider may produce.
+            configContinuation.yield(initialConfig)
+
+            // Start the config provider (e.g., discovery) if present. The
+            // provider owns its own polling state machine via run(into:).
+            if var provider {
+                self.logger.info("Starting config provider.")
+                group.addTask {
+                    await provider.run(into: configSink)
+                    configContinuation.finish()
+                    self.logger.info("Stopping config provider.")
+                }
+            } else {
                 // No more configs coming — finish the stream so the bundle
-                // worker task exits after processing the initial config.
+                // manager settles into steady state after the initial config.
                 configContinuation.finish()
             }
 
-            // Bundle worker group task: consumes configs, manages bundle loaders.
+            // Bundle manager: reconciles bundle loaders against each config,
+            // starting/stopping only the delta so persistent loaders keep their
+            // ETag + last-known-good bundle across config changes.
+            let bundleSink: OPA.BundleUpdateSink = { name, update in
+                switch update {
+                case .loaded(let bundle):
+                    self.updateBundleResult(name: name, result: .success(bundle))
+                case .failed(let error):
+                    self.updateBundleResult(name: name, result: .failure(error))
+                }
+            }
+            let manager = OPA.BundleManager(
+                factory: self.loaderFactory,
+                httpClientCache: self.httpClientCache,
+                sink: bundleSink,
+                onRemoved: { names in self.pruneBundles(names) },
+                logger: self.logger)
             group.addTask {
-                var currentWorkers: Task<Void, Never>? = nil
-
-                for await latestConfig in configStream {
-                    guard case .success(let config) = latestConfig else {
-                        // Either we have a valid new config and need to restart
-                        // everything, or there was an error, and we should go
-                        // back to waiting for a good config to arrive.
-                        continue
-                    }
-
-                    // Tear down previous generation of pollers.
-                    if let currentWorkers {
-                        self.logger.info("Stopping previous generation of bundle loaders.")
-                        currentWorkers.cancel()
-                        await currentWorkers.value
-                    }
-
-                    // Release the cached HTTP clients for services this config no
-                    // longer uses. This ensures we clean up unused HTTP clients.
-                    var referencedServices = Set(config.bundles.values.map { $0.service })
-                    if let discoveryService = config.discovery?.service {
-                        referencedServices.insert(discoveryService)
-                    }
-                    self.httpClientCache.retainOnly(services: referencedServices)
-
-                    // Spawn new bundle downloaders as a group.
-                    // The nested task here allows cancelling the entire
-                    // group of bundle loader workers when we encounter
-                    // a new config.
-                    self.logger.info("Starting new generation of bundle loaders.")
-                    currentWorkers = Task { [self] in
-                        await withTaskGroup(of: Void.self) { bundleGroup in
-                            for name in config.bundles.keys {
-                                self.logger.info("Starting bundle loader for bundle: \(name).")
-                                bundleGroup.addTask {
-                                    do {
-                                        var loader = try self.getBundleLoader(
-                                            name: name,
-                                            config: config,
-                                            logger: self.logger)
-                                        var longPollingEnabled = false
-                                        let polling = config.bundles[name]?.downloaderConfig.polling
-
-                                        while !Task.isCancelled {
-                                            // Attempt to fetch bundle. Update storage.
-                                            let result = await loader.load()
-                                            self.updateBundleResult(name: name, result: result)
-
-                                            // If our loader supports it, check long polling flag.
-                                            if let httpLoader = loader as? OPA.HTTPBundleLoader {
-                                                longPollingEnabled = httpLoader.isLongPollingEnabled()
-                                            }
-
-                                            // Sleep until next polling interval.
-                                            // If long-polling, the wait is happening in the loader, so skip this.
-                                            if !longPollingEnabled {
-                                                do {
-                                                    let sleepTime = Int64.random(
-                                                        in: (polling?.minDelaySeconds ?? 60)...(polling?.maxDelaySeconds
-                                                            ?? 120))
-                                                    try await Task.sleep(for: .seconds(sleepTime))
-                                                } catch {
-                                                    break  // Task was cancelled — exit cleanly.
-                                                }
-                                            }
-                                        }
-                                    } catch {
-                                        // Something failed around setting up the bundle loader. Record the error.
-                                        self.updateBundleResult(name: name, result: .failure(error))
-                                    }
-                                    self.logger.info("Stopping bundle loader for bundle: \(name).")
-                                }
-                            }
-                            // TaskGroup blocks here until all pollers finish or task is canceled.
-                        }
-                    }
-                }
-
-                // The config stream ended (e.g. no config provider).
-                // Keep current bundle pollers alive until this task is
-                // cancelled.
-                let workersToAwait = currentWorkers
-                await withTaskCancellationHandler {
-                    await workersToAwait?.value
-                } onCancel: {
-                    workersToAwait?.cancel()
-                }
+                await manager.run(configs: configStream)
             }
 
             // Block until all workers finish (cancellation or error).
@@ -687,34 +609,40 @@ extension OPA.Runtime {
     /// Updates the active config under the config lock and tracks the
     /// state of the last config polling attempt.
     ///
-    /// Called from the config polling loop after an off-lock fetch
+    /// Called from the config provider driver after an off-lock fetch
     /// completes. The critical section is short — only dictionary/enum
     /// comparisons and a small struct write.
+    ///
+    /// - Returns: `true` when the config generation advanced (a new, changed
+    ///   config was applied), so the caller knows to forward it to consumers.
+    @discardableResult
     private func updateConfig(
         result: Result<OPA.Config, any Swift.Error>
-    ) {
-        state.withLock { state in
+    ) -> Bool {
+        state.withLock { state -> Bool in
             // Deduplicate — skip if the result hasn't meaningfully changed.
             switch (state.latestConfig, result) {
             case (.success(let old), .success(let new))
             where old == new:
                 self.logger.debug("Config not modified.")
-                return
+                return false
             case (.failure(let old), .failure(let new))
             where String(describing: old) == String(describing: new):
                 self.logger.debug("Config still failed to load with error: \(new).")
-                return
+                return false
             case (_, .success(let new)):
                 self.logger.debug("Config updated.")
                 state.activeConfig = new
                 state.configGeneration &+= 1
+                state.latestConfig = result
+                return true
             default:
                 // A new (first or changed) failure. The polling loop already
                 // logs load failures at `.error`, so keep this at `.debug`.
                 self.logger.debug("Config load failed with a new error.")
-                break
+                state.latestConfig = result
+                return false
             }
-            state.latestConfig = result
         }
     }
 }
@@ -722,13 +650,10 @@ extension OPA.Runtime {
 // MARK: - Bundle Loading
 
 extension OPA.Runtime {
-    /// Builds a single bundle loader from the configured loader-type list,
-    /// based on its name and the OPA config.
-    ///
-    /// Loader selection is driven by the compatibleWithConfig check. Once a
-    /// type is selected, loaders conforming to ``OPA/HTTPBundleLoader`` are
-    /// built through the HTTP initializer so injected values like ``headers``
-    /// and ``httpClientConfig`` reach them.
+    /// Builds a single bundle loader for `name`, using the same selection policy
+    /// as the ``BundleLoaderFactory`` built at init but honoring the caller's
+    /// `logger`. Retained for existing callers/tests that inspect a constructed
+    /// loader.
     ///
     /// Reads only immutable Runtime state, so it is safe to call from
     /// any thread without locking.
@@ -737,33 +662,13 @@ extension OPA.Runtime {
         config: OPA.Config,
         logger: Logger
     ) throws -> OPA.BundleLoader {
-        var bundleLoader: OPA.BundleLoader?
-        for loaderType in self.bundleLoaders {
-            guard loaderType.compatibleWithConfig(config: config, bundleResourceName: name) else {
-                continue
-            }
-            if let httpLoaderType = loaderType as? any OPA.HTTPBundleLoader.Type {
-                bundleLoader = try httpLoaderType.init(
-                    config: config,
-                    bundleResourceName: name,
-                    etag: nil,
-                    headers: self.headers,
-                    httpClientConfig: self.httpClientConfig,
-                    httpClientCache: self.httpClientCache,
-                    logger: logger)
-            } else {
-                bundleLoader = try loaderType.init(config: config, bundleResourceName: name, logger: logger)
-            }
-            break
-        }
-
-        guard let loader = bundleLoader else {
-            throw RuntimeError(
-                code: .internalError,
-                message: "Unsupported bundle source for bundle \(name)")
-        }
-
-        return loader
+        let factory = OPA.BundleLoaderFactory(
+            loaderTypes: self.bundleLoaders,
+            headers: self.headers,
+            httpClientConfig: self.httpClientConfig,
+            httpClientCache: self.httpClientCache,
+            logger: logger)
+        return try factory.makeLoader(name: name, config: config)
     }
 
     /// Applies a single bundle result to the runtime's bundle state and
@@ -792,6 +697,23 @@ extension OPA.Runtime {
             }
             state.bundleStorage[name] = result
             state.bundleGeneration &+= 1
+        }
+    }
+
+    /// Removes the named bundles from storage and bumps the bundle generation
+    /// if anything was removed. Called by the ``BundleManager`` when a bundle
+    /// entry is dropped from the config, so its last-known result does not
+    /// linger. The critical section is short — only synchronous dictionary work.
+    private func pruneBundles(_ names: Set<String>) {
+        state.withLock { state in
+            var changed = false
+            for name in names where state.bundleStorage.removeValue(forKey: name) != nil {
+                changed = true
+                self.logger.debug("Pruning removed bundle \(name).")
+            }
+            if changed {
+                state.bundleGeneration &+= 1
+            }
         }
     }
 }

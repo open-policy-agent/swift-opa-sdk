@@ -121,6 +121,9 @@ extension OPA {
         /// Polling configuration.
         public let polling: PollingConfig?
 
+        /// Surfaces the stored polling window to the self-driving loop.
+        public var pollingConfig: OPA.PollingConfig? { polling }
+
         /// The cached instance of the last successfully fetched and parsed bundle.
         private var lastBundle: OPA.Bundle?
 
