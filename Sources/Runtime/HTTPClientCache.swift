@@ -47,8 +47,10 @@ extension OPA {
         private let eventLoopGroup: any EventLoopGroup
         private let logger: Logger
 
-        /// Uses the process-wide singleton `EventLoopGroup`.
-        convenience init(logger: Logger? = nil) {
+        /// Uses the process-wide singleton `EventLoopGroup`. Public so callers
+        /// building their own bundle management can share a warm client pool
+        /// across loaders without a ``Runtime``.
+        public convenience init(logger: Logger? = nil) {
             self.init(eventLoopGroup: .singletonMultiThreadedEventLoopGroup, logger: logger)
         }
 
@@ -113,7 +115,7 @@ extension OPA {
         /// `HTTPClient.shutdown()` closes the client's connections rather than
         /// draining them, so a request in flight on the superseded client is
         /// interrupted.
-        func client(service: String, configuration: HTTPClient.Configuration) -> HTTPClient {
+        public func client(service: String, configuration: HTTPClient.Configuration) -> HTTPClient {
             let (client, stale): (HTTPClient, HTTPClient?) = entries.withLock { entries in
                 if let existing = entries[service],
                     Self.configsEquivalentForPooling(existing.configuration, configuration)
@@ -135,7 +137,7 @@ extension OPA {
 
         /// Evicts and shuts down the cached clients for the given services.
         /// Used when a config generation change drops services from the config.
-        func evict(services: some Sequence<String>) {
+        public func evict(services: some Sequence<String>) {
             let stale: [HTTPClient] = entries.withLock { entries in
                 var removed: [HTTPClient] = []
                 for service in services {
@@ -154,7 +156,7 @@ extension OPA {
         /// `services`. Called when a new config generation is applied, so that
         /// clients for services that are no longer referenced are released
         /// promptly rather than lingering until teardown.
-        func retainOnly(services: Set<String>) {
+        public func retainOnly(services: Set<String>) {
             let stale: [HTTPClient] = entries.withLock { entries in
                 let removedKeys = entries.keys.filter { !services.contains($0) }
                 var removed: [HTTPClient] = []
@@ -175,7 +177,7 @@ extension OPA {
         /// this does not await the shutdowns, so it is safe to call while the
         /// `Runtime` keeps running. Any request in flight on an evicted client
         /// is interrupted.
-        func evictAll() {
+        public func evictAll() {
             let stale: [HTTPClient] = entries.withLock { entries in
                 let all = entries.values.map(\.client)
                 entries.removeAll()
@@ -189,7 +191,7 @@ extension OPA {
         /// Evicts and shuts down every cached client, concurrently. Called on
         /// `Runtime` teardown, after all pollers have stopped using their
         /// clients, so shutdown latency is bounded by the slowest single client.
-        func shutdownAll() async {
+        public func shutdownAll() async {
             let clients: [HTTPClient] = entries.withLock { entries in
                 let all = entries.values.map(\.client)
                 entries.removeAll()

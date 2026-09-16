@@ -116,36 +116,17 @@ extension OPA {
                 data: planData
             )
 
-            // Find the first compatible loader and construct it. Selection is
-            // driven solely by `compatibleWithDiscoveryConfig`.
-            var constructed: (any OPA.BundleLoader)?
-            for loaderType in bundleLoaders {
-                guard loaderType.compatibleWithDiscoveryConfig(config: bootConfig) else {
-                    continue
-                }
-                if let httpLoaderType = loaderType as? any OPA.HTTPBundleLoader.Type {
-                    constructed = try httpLoaderType.init(
-                        discoveryConfig: bootConfig,
-                        etag: nil,
-                        headers: headers,
-                        httpClientConfig: httpClientConfig,
-                        httpClientCache: httpClientCache,
-                        logger: logger)
-                } else {
-                    constructed = try loaderType.init(discoveryConfig: bootConfig, logger: logger)
-                }
-                break
-            }
-
-            guard let constructed else {
-                throw RuntimeError(
-                    code: .internalError,
-                    message: "No compatible bundle loader found for discovery configuration"
-                )
-            }
-
-            self.loader = constructed
-            self.logger = logger ?? Logger(label: "swift-opa.config.discovery")
+            // Select and construct the discovery loader via the shared factory.
+            // Resolve the logger first so the loader receives it too.
+            let resolvedLogger = logger ?? Logger(label: "swift-opa.config.discovery")
+            let factory = OPA.BundleLoaderFactory(
+                loaderTypes: bundleLoaders,
+                headers: headers,
+                httpClientConfig: httpClientConfig,
+                httpClientCache: httpClientCache,
+                logger: resolvedLogger)
+            self.loader = try factory.makeDiscoveryLoader(config: bootConfig)
+            self.logger = resolvedLogger
         }
 
         // MARK: - ConfigProvider

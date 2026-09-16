@@ -29,6 +29,11 @@ extension OPA {
         /// The polling window the Runtime's config loop should honor between
         /// loads. Returns nil to accept the Runtime's default window.
         func pollingConfig() -> OPA.PollingConfig?
+
+        /// Owns this provider's polling loop, reporting each poll to `sink` until
+        /// the enclosing `Task` is cancelled. Defaulted to a loop that repeatedly
+        /// calls ``load()``.
+        mutating func run(into sink: @escaping OPA.ConfigUpdateSink) async
     }
 
     /// HTTPConfigProvider is a slightly more specialized protocol to allow greater
@@ -43,4 +48,10 @@ extension OPA {
 /// that compose another provider can forward to its `pollingConfig()` here.
 extension OPA.ConfigProvider {
     public func pollingConfig() -> OPA.PollingConfig? { nil }
+
+    /// Default self-driving loop: repeatedly ``load()`` and report to `sink`,
+    /// honoring long-polling and the provider's polling window, until cancelled.
+    public mutating func run(into sink: @escaping OPA.ConfigUpdateSink) async {
+        await OPA.Polling.runConfigLoop(&self, into: sink)
+    }
 }

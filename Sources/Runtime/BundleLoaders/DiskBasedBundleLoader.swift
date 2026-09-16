@@ -24,6 +24,9 @@ extension OPA {
         /// Polling configuration.
         public let polling: PollingConfig?
 
+        /// Surfaces the stored polling window to the self-driving loop.
+        public var pollingConfig: OPA.PollingConfig? { polling }
+
         private var logger: Logger
 
         public init(config: OPA.Config, bundleResourceName: String, logger: Logger? = nil) throws {

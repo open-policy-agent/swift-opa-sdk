@@ -22,6 +22,15 @@ extension OPA {
         /// Load the bundle, based on the config and any existing state.
         mutating func load() async -> Result<OPA.Bundle, any Swift.Error>
 
+        /// The polling window this loader should honor between loads. Returns
+        /// nil to accept the default window. Defaulted to nil.
+        var pollingConfig: OPA.PollingConfig? { get }
+
+        /// Owns this loader's polling loop, reporting each poll to `sink` until
+        /// the enclosing `Task` is cancelled. Defaulted to a loop that repeatedly
+        /// calls ``load()``, so most loaders never implement it directly.
+        mutating func run(name: String, into sink: @escaping OPA.BundleUpdateSink) async
+
         /// Compatibility check, based on what's in the OPA config.
         static func compatibleWithConfig(config: OPA.Config, bundleResourceName: String) -> Bool
 
@@ -61,6 +70,19 @@ extension OPA {
 
         /// Used by the loader-managing task to determine whether to sleep or not between polls.
         func isLongPollingEnabled() -> Bool
+    }
+}
+
+// MARK: - Default Polling Loop
+
+extension OPA.BundleLoader {
+    /// Default: no loader-specific polling window.
+    public var pollingConfig: OPA.PollingConfig? { nil }
+
+    /// Default self-driving loop: repeatedly ``load()`` and report to `sink`,
+    /// honoring long-polling and the loader's polling window, until cancelled.
+    public mutating func run(name: String, into sink: @escaping OPA.BundleUpdateSink) async {
+        await OPA.Polling.runBundleLoop(&self, name: name, into: sink)
     }
 }
 

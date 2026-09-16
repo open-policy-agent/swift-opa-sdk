@@ -288,7 +288,7 @@ func withBundleServer(
     }
 }
 
-func withRunningRuntime(
+private func withRunningRuntime(
     server: TestBundleServer,
     configJSON: String,
     bundleName: String = "test",
