@@ -245,14 +245,22 @@ extension OPA {
             // Build config provider.
             let resolvedProvider: (any OPA.ConfigProvider)?
             if let configProvider {
+                self.logger.debug("Using injected config provider.")
                 resolvedProvider = configProvider
             } else if config.discovery != nil {
-                resolvedProvider = try DiscoveryConfigProvider(
-                    bootConfig: config,
-                    bundleLoaders: bundleLoaders,
-                    headers: headers,
-                    httpClientConfig: self.httpClientConfig,
-                    httpClientCache: self.httpClientCache)
+                self.logger.debug("Boot config has a discovery section. Building DiscoveryConfigProvider.")
+                do {
+                    resolvedProvider = try DiscoveryConfigProvider(
+                        bootConfig: config,
+                        bundleLoaders: bundleLoaders,
+                        headers: headers,
+                        httpClientConfig: self.httpClientConfig,
+                        httpClientCache: self.httpClientCache,
+                        logger: self.logger)
+                } catch {
+                    self.logger.error("Failed to construct DiscoveryConfigProvider from boot config: \(error)")
+                    throw error
+                }
             } else {
                 resolvedProvider = nil
             }
@@ -533,7 +541,9 @@ extension OPA.Runtime {
                     var currentConfigGeneration = self.state.withLock { $0.configGeneration }
                     while !Task.isCancelled {
                         let result = await provider.load()
-
+                        if case .failure(let error) = result {
+                            self.logger.error("Config provider load() failed: \(error)")
+                        }
                         // Attempt to update the active config. Only publish on change.
                         self.updateConfig(result: result)
                         let newConfigGeneration = self.state.withLock { $0.configGeneration }
@@ -695,10 +705,13 @@ extension OPA.Runtime {
                 self.logger.debug("Config still failed to load with error: \(new).")
                 return
             case (_, .success(let new)):
+                self.logger.debug("Config updated.")
                 state.activeConfig = new
                 state.configGeneration &+= 1
             default:
-                self.logger.debug("Updating config.")
+                // A new (first or changed) failure. The polling loop already
+                // logs load failures at `.error`, so keep this at `.debug`.
+                self.logger.debug("Config load failed with a new error.")
                 break
             }
             state.latestConfig = result
