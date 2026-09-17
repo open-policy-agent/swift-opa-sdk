@@ -5,6 +5,26 @@ project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## 0.0.5
+
+This release fixes a number of bugs around bundle state management (#68, #69), and introduces a breaking change to the `BundleLoader` protocol.
+
+### Breaking Changes
+
+The `BundleLoader` protocol's `load()` method signature has changed, from `mutating func load() async -> Result<OPA.Bundle, any Swift.Error>` to `mutating func load() async -> OPA.BundleUpdate` (#69).
+The `OPA.BundleUpdate` type is an enum with three states:
+ - `.downloaded`
+ - `.notModified`
+ - `.failed`
+
+This change allowed simplifying the state management around bundles in several places, and should be a mostly mechanical refactoring for existing library users.
+It also has the benefit of allowing `BundleLoader` implementing types to no longer need to locally cache the last-known good bundle, which was an issue for the HTTP-based bundle loaders.
+
+### Miscellaneous
+
+ - Runtime: Improve logging around ConfigProvider initialization failures (#67) authored by @philipaconrad
+
+
 ## 0.0.4
 
 This release introduces our new [DocC documentation generation](https://www.swift.org/documentation/docc/) setup, and includes some minor improvements to the `Runtime`'s error types.
