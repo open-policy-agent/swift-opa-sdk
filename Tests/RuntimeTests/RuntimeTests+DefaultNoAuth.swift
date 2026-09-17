@@ -35,19 +35,15 @@ struct RuntimeHHTTPBundleDefaultNoAuthTests {
         defer { backgroundFetchTask.cancel() }
 
         let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(1))
-        let bundleStorage = rt.bundleStorage
+        let bundleStorage = rt.activeBundles()
         let bundleResult = try #require(
             bundleStorage.first, "Expected exactly 1 bundle, got \(bundleStorage.count)")
         #expect(bundleStorage.count == 1, "Expected exactly 1 bundle, got \(bundleStorage.count)")
-        guard case .success = bundleResult.value else {
-            Issue.record("Expected bundle '\(bundleResult.key)' to be .success, got \(bundleResult.value)")
+        guard bundleResult.value.bundle != nil else {
+            Issue.record("Expected bundle '\(bundleResult.key)' to be loaded, got \(bundleResult.value)")
             return
         }
-        #expect(
-            bundleStorage.allSatisfy { (_, value) in
-                if case .success = value { return true }
-                return false
-            })
+        #expect(bundleStorage.allSatisfy { $0.value.bundle != nil })
 
         let dr = try await rt.decision("data/foo/hello", input: nil)
         #expect(dr.result.first == ["result": 1])
@@ -79,12 +75,12 @@ struct RuntimeHHTTPBundleDefaultNoAuthTests {
         defer { backgroundFetchTask.cancel() }
 
         let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(1))
-        let bundleStorage = rt.bundleStorage
+        let bundleStorage = rt.activeBundles()
         let bundleResult = try #require(
             bundleStorage.first, "Expected exactly 1 bundle, got \(bundleStorage.count)")
         #expect(bundleStorage.count == 1, "Expected exactly 1 bundle, got \(bundleStorage.count)")
-        guard case .success = bundleResult.value else {
-            Issue.record("Expected bundle '\(bundleResult.key)' to be .success, got \(bundleResult.value)")
+        guard bundleResult.value.bundle != nil else {
+            Issue.record("Expected bundle '\(bundleResult.key)' to be loaded, got \(bundleResult.value)")
             return
         }
 
@@ -115,13 +111,11 @@ struct RuntimeHHTTPBundleDefaultNoAuthTests {
         defer { backgroundFetchTask.cancel() }
 
         let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(1))
-        let bundleStorage = rt.bundleStorage
+        let bundleStorage = rt.activeBundles()
         #expect(bundleStorage.count == 1)
         #expect(
-            bundleStorage.allSatisfy { (_, value) in
-                if case .failure = value { return true }
-                return false
-            }, "Expected bundle load to fail for 404 response")
+            bundleStorage.allSatisfy { $0.value.bundle == nil },
+            "Expected bundle load to fail for 404 response")
     }
 
     @Test("service URL with invalid scheme fails config decode")

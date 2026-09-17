@@ -4,8 +4,13 @@ import Rego
 extension OPA {
     /// One outcome of a single poll, emitted by a self-driving bundle loader.
     public enum BundleUpdate: Sendable {
-        /// A bundle was fetched and parsed. May be byte-identical to the previous one.
-        case loaded(OPA.Bundle)
+        /// A fresh bundle was fetched and parsed (HTTP 200 with new bytes, or a
+        /// disk read). May be byte-identical to the previously activated one.
+        /// Carries the source `etag` and downloaded `size` in bytes when known.
+        case downloaded(OPA.Bundle, etag: String?, size: Int?)
+        /// The source confirmed the current bundle is unchanged (HTTP 304). No
+        /// bundle is carried. The runtime keeps enforcing the last-known-good one.
+        case notModified(etag: String?)
         /// The fetch or parse failed.
         case failed(any Swift.Error)
     }
@@ -52,12 +57,9 @@ extension OPA {
             wait: @Sendable (Int64) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
         ) async {
             while !Task.isCancelled {
-                let result = await loader.load()
+                let update = await loader.load()
                 if Task.isCancelled { break }  // don't report a poll that raced cancellation
-                switch result {
-                case .success(let bundle): sink(name, .loaded(bundle))
-                case .failure(let error): sink(name, .failed(error))
-                }
+                sink(name, update)
                 let longPoll = (loader as? any OPA.HTTPBundleLoader)?.isLongPollingEnabled() ?? false
                 if longPoll { continue }
                 do { try await wait(nextDelaySeconds(loader.pollingConfig)) } catch { break }

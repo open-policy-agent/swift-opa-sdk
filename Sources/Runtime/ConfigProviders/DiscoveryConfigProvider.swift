@@ -45,6 +45,14 @@ extension OPA {
         /// Logger instance to use for log messages.
         private var logger: Logger
 
+        /// The last discovery bundle successfully downloaded. Cached so a
+        /// `.notModified` (HTTP 304) poll can re-evaluate the unchanged bundle.
+        /// This will cause reoccurring evaluation failures, instead of caching
+        /// the last successful config. We assume that users will cache the
+        /// last-known good config themselves. `nil` until the first successful
+        /// download.
+        private var lastBundle: OPA.Bundle?
+
         /// Query string derived from `discoveryConfig.decision` and used to
         /// evaluate the discovery bundle (`data` / `data.<dot.path>`).
         private let discoveryQuery: String
@@ -127,6 +135,7 @@ extension OPA {
                 logger: resolvedLogger)
             self.loader = try factory.makeDiscoveryLoader(config: bootConfig)
             self.logger = resolvedLogger
+            self.lastBundle = nil
         }
 
         // MARK: - ConfigProvider
@@ -139,25 +148,42 @@ extension OPA {
         /// plan injected so direct `data.<path>` discovery queries resolve
         /// against the bundle's data tree.
         public mutating func load() async -> Result<OPA.Config, any Swift.Error> {
-            let result = await self.loader.load()
-
-            switch result {
-            case .success(let bundle):
-                do {
-                    let preparedBundle = try prepareBundleForEvaluation(bundle)
-                    let discoveredConfig = try await Self.evaluateDiscoveryBundle(
-                        bundle: preparedBundle,
-                        query: discoveryQuery
-                    )
-                    let mergedConfig = try Self.mergeConfigs(
-                        boot: bootConfig,
-                        discovered: discoveredConfig
-                    )
-                    return .success(mergedConfig)
-                } catch {
-                    return .failure(error)
+            switch await self.loader.load() {
+            case .downloaded(let bundle, _, _):
+                self.lastBundle = bundle
+                return await evaluateToConfig(bundle)
+            case .notModified:
+                // The discovery bundle is unchanged. We re-evaluate the cached
+                // bundle if one exists, and return the result.
+                guard let bundle = self.lastBundle else {
+                    return .failure(
+                        RuntimeError(
+                            code: .bundleLoadError,
+                            message:
+                                "Discovery source returned 304 Not Modified, but no bundle was previously downloaded."
+                        ))
                 }
-            case .failure(let error):
+                return await evaluateToConfig(bundle)
+            case .failed(let error):
+                return .failure(error)
+            }
+        }
+
+        /// Evaluates a discovery bundle into a merged config, returning any
+        /// preparation, evaluation, or merge error as a `.failure`.
+        private func evaluateToConfig(_ bundle: OPA.Bundle) async -> Result<OPA.Config, any Swift.Error> {
+            do {
+                let preparedBundle = try prepareBundleForEvaluation(bundle)
+                let discoveredConfig = try await Self.evaluateDiscoveryBundle(
+                    bundle: preparedBundle,
+                    query: discoveryQuery
+                )
+                let mergedConfig = try Self.mergeConfigs(
+                    boot: bootConfig,
+                    discovered: discoveredConfig
+                )
+                return .success(mergedConfig)
+            } catch {
                 return .failure(error)
             }
         }

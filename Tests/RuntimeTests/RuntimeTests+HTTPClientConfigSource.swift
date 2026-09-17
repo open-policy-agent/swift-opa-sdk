@@ -182,7 +182,7 @@ struct RuntimeHTTPClientConfigSourceTests {
 
         let result = try #require(
             await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(20)) { result in
-                if case .success = result { return true }
+                if case .downloaded = result { return true }
                 return false
             },
             "the rotated identity never produced a successful poll")

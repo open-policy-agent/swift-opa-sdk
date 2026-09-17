@@ -98,8 +98,11 @@ extension OPA {
             self.id = try Self.extractID(from: config)
         }
 
-        func load() async -> Result<OPA.Bundle, any Error> {
-            MockBundleLoaderRegistry.shared.nextResult(for: id)
+        func load() async -> OPA.BundleUpdate {
+            switch MockBundleLoaderRegistry.shared.nextResult(for: id) {
+            case .success(let bundle): return .downloaded(bundle, etag: nil, size: nil)
+            case .failure(let error): return .failed(error)
+            }
         }
 
         static func compatibleWithConfig(config: OPA.Config, bundleResourceName: String) -> Bool {

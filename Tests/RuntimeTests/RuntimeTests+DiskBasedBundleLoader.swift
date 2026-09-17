@@ -106,13 +106,9 @@ struct RuntimeDiskBasedBundleTests {
         defer { backgroundFetchTask.cancel() }
         let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(1))
 
-        let bundleStorage = rt.bundleStorage
+        let bundleStorage = rt.activeBundles()
         #expect(bundleStorage.count == 1, "Expected exactly 1 succesful bundle load, got \(bundleStorage.count)")
-        #expect(
-            bundleStorage.allSatisfy({ (key: String, value: Result<OPA.Bundle, any Error>) in
-                if case .success = value { return true }
-                return false
-            }))
+        #expect(bundleStorage.allSatisfy { $0.value.bundle != nil })
 
         // Check decision result.
         let dr = try await rt.decision("data/foo/hello", input: nil)
@@ -129,7 +125,7 @@ struct RuntimeDiskBasedBundleTests {
 
         enum FailureStage: Sendable {
             case decode  // JSONDecoder fails
-            case bundleInit  // DiskBasedBundleLoader init throws
+            case loadFails  // the source is invalid/missing, so the bundle never activates
         }
     }
 
@@ -185,7 +181,7 @@ struct RuntimeDiskBasedBundleTests {
                         }
                     """#,
                 needsTempDir: false,
-                failsAt: .bundleInit
+                failsAt: .loadFails
             ),
             // Points at a file:// directory that exists but is empty (no manifest, no data)
             InvalidTestCase(
@@ -198,7 +194,7 @@ struct RuntimeDiskBasedBundleTests {
                         }
                     """#,
                 needsTempDir: true,
-                failsAt: .bundleInit
+                failsAt: .loadFails
             ),
             // Malformed JSON where bundles value is wrong type
             InvalidTestCase(
@@ -238,21 +234,20 @@ struct RuntimeDiskBasedBundleTests {
                 _ = try JSONDecoder().decode(OPA.Config.self, from: configString.data(using: .utf8)!)
             }
 
-        case .bundleInit:
+        case .loadFails:
             let config = try JSONDecoder().decode(OPA.Config.self, from: configString.data(using: .utf8)!)
-            // Runtime init or bundle loader construction should throw
-            await #expect(throws: RuntimeError.self) {
-                let rt = try OPA.Runtime(config: config)
+            let rt = try OPA.Runtime(config: config)
 
-                let backgroundFetchTask = Task { try await rt.run() }
-                defer { backgroundFetchTask.cancel() }
+            let backgroundFetchTask = Task { try await rt.run() }
+            defer { backgroundFetchTask.cancel() }
 
-                let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(1))
-                let bundleStorage = rt.bundleStorage
-                for (_, bundleResult) in bundleStorage {
-                    let _ = try bundleResult.get()
-                }
-            }
+            // The source is invalid/missing, so every poll fails: the bundle is
+            // never activated and an error is recorded in its status metadata.
+            let meta = await waitForBundleError(rt: rt, name: "test", timeout: .seconds(2))
+            #expect(meta?.code != nil, "expected a load error to be recorded")
+            #expect(
+                rt.activeBundles()["test"]?.bundle == nil,
+                "an invalid source must not activate a bundle")
         }
     }
 }

@@ -112,9 +112,8 @@ struct RuntimeHTTPBundleOAuth2Tests {
         defer { backgroundFetchTask.cancel() }
 
         let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(5))
-        let bundleStorage = rt.bundleStorage
-        let bundleResult = try #require(bundleStorage["test"], "Expected bundle 'test' to be present")
-        let _ = try requireBundleLoadSuccess(bundleResult, context: "happy-path OAuth2 bundle load")
+        let status = try #require(rt.activeBundles()["test"], "Expected bundle 'test' to be present")
+        #expect(status.bundle != nil, "happy-path OAuth2 bundle load")
 
         let tokenRequests = servers.token.state.requests.filter { $0.uri.hasPrefix(servers.tokenPath) }
         let bundleRequests = servers.bundle.state.requests.filter { $0.uri == "/bundles/bundle.tar.gz" }

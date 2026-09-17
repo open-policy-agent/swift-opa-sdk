@@ -124,9 +124,6 @@ extension OPA {
         /// Surfaces the stored polling window to the self-driving loop.
         public var pollingConfig: OPA.PollingConfig? { polling }
 
-        /// The cached instance of the last successfully fetched and parsed bundle.
-        private var lastBundle: OPA.Bundle?
-
         /// A state flag for tracking whether the next request from this
         /// loader will be attempting a long-polling request or not.
         private var longPollingEnabled: Bool
@@ -260,7 +257,6 @@ extension OPA {
             self.httpClientConfig = Self.baselineHTTPClientConfig(for: httpClientConfig)
             self.httpClientCache = httpClientCache
             self.polling = resource.downloaderConfig.polling
-            self.lastBundle = nil
             self.longPollingEnabled = false
             self.logger = logger ?? Logger(label: "swift-opa.bundle.downloader")
             self.credentialLoader = try Self.buildCredentialLoader(
@@ -322,7 +318,6 @@ extension OPA {
             self.httpClientConfig = Self.baselineHTTPClientConfig(for: httpClientConfig)
             self.httpClientCache = httpClientCache
             self.polling = discovery.downloaderConfig.polling
-            self.lastBundle = nil
             self.longPollingEnabled = false
             self.logger = logger ?? Logger(label: "swift-opa.bundle.rest-client.discovery")
             self.credentialLoader = try Self.buildCredentialLoader(
@@ -421,7 +416,7 @@ extension OPA {
         ///
         /// This method adjusts request headers based on the credential type,
         /// `ETag` caching, and long-polling support of the bundle server.
-        public mutating func load() async -> Result<OPA.Bundle, any Swift.Error> {
+        public mutating func load() async -> OPA.BundleUpdate {
             let headers =
                 (self.serviceConfig.headers ?? [:]).merging(
                     self.customHeaders, uniquingKeysWith: { (_, new) in new })
@@ -441,7 +436,7 @@ extension OPA {
                 self.httpClientConfig = try await self.buildActiveHTTPClientConfig()
                 try await self.prepareCredentials(req: &httpRequest)
             } catch {
-                return .failure(error)
+                return .failed(error)
             }
 
             // Set If-None-Match header for ETag supporting servers.
@@ -499,18 +494,9 @@ extension OPA {
                         }
 
                         if response.status.code == 304 {
-                            guard let bundle = self.lastBundle else {
-                                return Result<OPA.Bundle, Error>.failure(
-                                    BundleFetchError(
-                                        code: .bundleLoadError,
-                                        message:
-                                            "Bundle download failed. Server returned response code 304 Not Modified, but no prior bundle cached.",
-                                        httpStatus: 304,
-                                        host: self.fetchURL.host
-                                    ))
-                            }
-                            return .success(bundle)
-                            // Otherwise, fall through to error handler.
+                            // The source confirms our current bundle is still
+                            // valid. The runtime holds the last-known-good bundle.
+                            return .notModified(etag: self.etag)
                         }
 
                         guard (200..<300).contains(response.status.code) else {
@@ -541,22 +527,22 @@ extension OPA {
                             )
                         }
 
-                        // Cache last bundle, so we can handle the "no changes case".
-                        self.lastBundle = newBundle
                         self.etag = response.headers["etag"].first ?? ""
                         self.longPollingEnabled = isLongPollingSupported(headers: response.headers)
-                        return .success(newBundle)
+                        return .downloaded(newBundle, etag: self.etag, size: data.count)
                     })
             } catch let error as any RuntimeFailure {
-                // Structured errors (HTTP status, 304, decode) already carry
-                // their code / status / host. Pass them through unchanged.
+                // Structured errors (HTTP status, decode) already carry their
+                // code / status / host. Pass them through unchanged. Forget the
+                // etag so the next poll is a full GET rather than a conditional
+                // one. The runtime keeps reporting the last-known-good etag.
                 self.etag = ""
-                return .failure(error)
+                return .failed(error)
             } catch {
                 // Anything else is a true transport failure (network, DNS,
                 // TLS, timeout) thrown before an HTTP response was available.
                 self.etag = ""
-                return .failure(BundleFetchError.transport(url: self.fetchURL, cause: error))
+                return .failed(BundleFetchError.transport(url: self.fetchURL, cause: error))
             }
         }
 

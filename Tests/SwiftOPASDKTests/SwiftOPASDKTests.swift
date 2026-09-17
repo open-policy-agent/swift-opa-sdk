@@ -11,11 +11,11 @@ extension OPA {
     struct CannedBundleLoader: OPA.BundleLoader {
         init(config: OPA.Config, bundleResourceName: String, logger: Logger?) throws {}
 
-        func load() async -> Result<OPA.Bundle, any Error> {
+        func load() async -> OPA.BundleUpdate {
             do {
-                return .success(try OPA.Bundle())
+                return .downloaded(try OPA.Bundle(), etag: nil, size: nil)
             } catch {
-                return .failure(error)
+                return .failed(error)
             }
         }
 
@@ -38,6 +38,10 @@ struct SwiftOPASDKPublicSurfaceTests {
         // The cache type is referenced only by name (its init/methods are
         // internal; consumers control it via Runtime's evict* methods).
         let _: OPA.HTTPClientCache.Type = OPA.HTTPClientCache.self
+        // Bundle status surface (activeBundles / activeBundleMetadata).
+        let _: OPA.BundleStatus.Type = OPA.BundleStatus.self
+        let _: OPA.BundleStatusMetadata.Type = OPA.BundleStatusMetadata.self
+        let _: OPA.StatusError.Type = OPA.StatusError.self
     }
 
     @Test("a consumer can inject a mock BundleLoader and load a bundle without network")
@@ -58,13 +62,13 @@ struct SwiftOPASDKPublicSurfaceTests {
 
         var loaded = false
         for _ in 0..<100 {
-            if runtime.bundleStorage["test"] != nil {
+            if runtime.activeBundles()["test"]?.bundle != nil {
                 loaded = true
                 break
             }
             try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(loaded, "the injected mock loader's bundle should reach bundle storage")
+        #expect(loaded, "the injected mock loader's bundle should become active")
 
         // Manual cache-control API is reachable too.
         runtime.evictAllCachedHTTPClients()

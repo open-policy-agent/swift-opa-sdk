@@ -72,49 +72,96 @@ public func makeExampleBundle(
     return try OPA.Bundle(manifest: manifest, planFiles: planFiles, regoFiles: regoFiles, data: data)
 }
 
-/// Polls until the named bundle appears in the runtime's storage and
-/// `predicate` returns `true`, or the timeout expires. When no predicate
-/// is provided, this degrades into an "is bundle loaded?" check.
+/// Polls until the named bundle reaches an observable poll outcome and
+/// `predicate` returns `true`, or the timeout expires. Returns a
+/// ``OPA/BundleUpdate`` synthesized from the runtime's `activeBundles()`
+/// snapshot: `.downloaded` when a bundle is active, `.failed` when only an error
+/// is recorded, and `nil` while nothing has been observed yet. When no predicate
+/// is provided, this degrades into an "is there any outcome yet?" check.
+///
+/// - Important: once a bundle has been activated it always reports
+///   `.downloaded` here, because a failing refresh keeps the bundle live. To
+///   wait for a failure recorded *beside* a still-live bundle, use
+///   ``waitForBundleError`` instead — a `.failed` predicate would never match
+///   and would block for the full timeout.
 public func waitForBundleLoad(
     rt: OPA.Runtime,
     name: String,
     timeout: Duration = .seconds(30),
     pollInterval: Duration = .milliseconds(100),
-    where predicate: (@Sendable (Result<OPA.Bundle, any Swift.Error>) -> Bool)? = nil
-) async -> Result<OPA.Bundle, any Swift.Error>? {
+    where predicate: (@Sendable (OPA.BundleUpdate) -> Bool)? = nil
+) async -> OPA.BundleUpdate? {
     TestLogging.ensureBootstrapped()
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
-        if let result = rt.bundleStorage[name],
-            predicate?(result) ?? true
+        if let update = bundleUpdateSnapshot(rt: rt, name: name),
+            predicate?(update) ?? true
         {
-            return result
+            return update
         }
         try? await Task.sleep(for: pollInterval)
     }
     return nil
 }
 
-/// Unwrap a successful bundle result or fail the test.
+/// Synthesizes a ``OPA/BundleUpdate`` for `name` from the runtime's current
+/// status snapshot: `.downloaded` when a bundle is active, `.failed` when only
+/// an error is recorded, `nil` when nothing has been observed yet.
+private func bundleUpdateSnapshot(rt: OPA.Runtime, name: String) -> OPA.BundleUpdate? {
+    guard let status = rt.activeBundles()[name] else { return nil }
+    let meta = status.metadata
+    if let bundle = status.bundle {
+        return .downloaded(bundle, etag: meta.etag, size: meta.size)
+    }
+    if meta.code != nil {
+        return .failed(
+            BundleFetchError(
+                code: .bundleLoadError,
+                message: meta.message ?? "bundle \(name) failed to load",
+                httpStatus: meta.httpCode))
+    }
+    return nil
+}
+
+/// Polls until the named bundle has an error recorded in its status metadata
+/// (its most recent poll failed), or the timeout expires. Unlike
+/// ``waitForBundleLoad``, this surfaces a failure recorded *beside* a
+/// still-live bundle.
+public func waitForBundleError(
+    rt: OPA.Runtime,
+    name: String,
+    timeout: Duration = .seconds(30),
+    pollInterval: Duration = .milliseconds(100)
+) async -> OPA.BundleStatusMetadata? {
+    TestLogging.ensureBootstrapped()
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if let meta = rt.activeBundleMetadata()[name], meta.code != nil { return meta }
+        try? await Task.sleep(for: pollInterval)
+    }
+    return nil
+}
+
+/// Unwrap a successful (downloaded) bundle outcome or fail the test.
 public func requireBundleLoadSuccess(
-    _ result: Result<OPA.Bundle, Error>,
+    _ update: OPA.BundleUpdate,
     context: String = ""
 ) throws -> OPA.Bundle {
-    guard case .success(let bundle) = result else {
-        let msg = "Expected .success\(context.isEmpty ? "" : " \(context)"), got \(result)"
+    guard case .downloaded(let bundle, _, _) = update else {
+        let msg = "Expected .downloaded\(context.isEmpty ? "" : " \(context)"), got \(update)"
         Issue.record(Comment(rawValue: msg))
         throw BundleResultError.unexpectedFailure(message: msg)
     }
     return bundle
 }
 
-/// Unwrap a failure bundle result or fail the test.
+/// Unwrap a failed bundle outcome or fail the test.
 public func requireBundleLoadFailure(
-    _ result: Result<OPA.Bundle, Error>,
+    _ update: OPA.BundleUpdate,
     context: String = ""
 ) throws -> Error {
-    guard case .failure(let error) = result else {
-        let msg = "Expected .failure\(context.isEmpty ? "" : " \(context)"), got \(result)"
+    guard case .failed(let error) = update else {
+        let msg = "Expected .failed\(context.isEmpty ? "" : " \(context)"), got \(update)"
         Issue.record(Comment(rawValue: msg))
         throw BundleResultError.unexpectedFailure(message: msg)
     }

@@ -20,7 +20,12 @@ extension OPA {
         init(discoveryConfig: OPA.Config, logger: Logger?) throws
 
         /// Load the bundle, based on the config and any existing state.
-        mutating func load() async -> Result<OPA.Bundle, any Swift.Error>
+        ///
+        /// Returns a single poll outcome:
+        /// - `.downloaded`: fresh bytes were fetched.
+        /// - `.notModified`: the source confirmed the current bundle is unchanged (e.g. HTTP 304).
+        /// - `.failed`: the fetch or parse failed.
+        mutating func load() async -> OPA.BundleUpdate
 
         /// The polling window this loader should honor between loads. Returns
         /// nil to accept the default window. Defaulted to nil.

@@ -202,7 +202,7 @@ struct RuntimeHTTPBundleClientTLSAuthTests {
         let failed = await waitForBundleLoad(
             rt: rt, name: "test", timeout: .seconds(10)
         ) { result in
-            if case .failure = result { return true }
+            if case .failed = result { return true }
             return false
         }
         guard let result = failed else {
@@ -249,11 +249,10 @@ struct RuntimeHTTPBundleClientTLSAuthTests {
         let backgroundFetchTask = Task { try await rt.run() }
         defer { backgroundFetchTask.cancel() }
 
-        let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(2))
-        let bundleStorage = rt.bundleStorage
-        let bundleResult = try #require(
-            bundleStorage["test"], "Expected bundle storage entry for 'test'")
-        let _ = try requireBundleLoadFailure(bundleResult, context: "cert file missing")
+        let result = try #require(
+            await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(2)),
+            "Expected a bundle outcome for 'test'")
+        let _ = try requireBundleLoadFailure(result, context: "cert file missing")
     }
 
     @Test("bundle load fails when client cert path exists but private_key path does not")
@@ -295,10 +294,10 @@ struct RuntimeHTTPBundleClientTLSAuthTests {
         let backgroundFetchTask = Task { try await rt.run() }
         defer { backgroundFetchTask.cancel() }
 
-        let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(2))
-        let bundleStorage = rt.bundleStorage
-        let bundleResult = try #require(bundleStorage["test"])
-        let _ = try requireBundleLoadFailure(bundleResult, context: "key file missing")
+        let result = try #require(
+            await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(2)),
+            "Expected a bundle outcome for 'test'")
+        let _ = try requireBundleLoadFailure(result, context: "key file missing")
     }
 
     // MARK: - Valid Cases (require mTLS test server)
@@ -479,34 +478,31 @@ struct RuntimeHTTPBundleClientTLSAuthTests {
 
         // Wait for first successful load.
         let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(5))
-        let firstStorage = rt.bundleStorage
-        guard case .success = firstStorage["test"] else {
+        guard rt.activeBundles()["test"]?.bundle != nil else {
             Issue.record(
-                "Expected initial load to succeed, got \(String(describing: firstStorage["test"]))")
+                "Expected initial load to succeed, got \(String(describing: rt.activeBundles()["test"]))")
             return
         }
 
         // Rotate: overwrite the client cert on disk with a brand-new self-signed
         // cert. The server still only trusts the original cert, so the next load
-        // must fail.
+        // must fail. The previously-loaded bundle stays enforced; the failure is
+        // recorded beside it in the bundle's status metadata.
         try generateTestCertificate(
             certPath: env.clientCert,
             keyPath: env.clientKey,
             serialNumber: 99
         )
 
-        // Poll for the storage entry to flip from .success to .failure.
-        let flipped = await waitForBundleLoad(
-            rt: rt, name: "test", timeout: .seconds(10)
-        ) { result in
-            if case .failure = result { return true }
-            return false
-        }
-        guard let result = flipped else {
-            Issue.record("Test bundle failed to load after cert rotation")
+        // Poll for an error to be recorded on the bundle's status.
+        guard let meta = await waitForBundleError(rt: rt, name: "test", timeout: .seconds(10)) else {
+            Issue.record("Expected an error to be recorded after cert rotation")
             return
         }
-        let _ = try requireBundleLoadFailure(result, context: "expected transition to .failure after cert rotation")
+        #expect(meta.code != nil, "cert-rotation failure should surface as a status error")
+        #expect(
+            rt.activeBundles()["test"]?.bundle != nil,
+            "the previously-loaded bundle must stay enforced despite the failing poll")
     }
 
     // MARK: - Encrypted-PEM Happy Path
@@ -574,10 +570,9 @@ struct RuntimeHTTPBundleClientTLSAuthTests {
         defer { backgroundFetchTask.cancel() }
 
         let _ = await waitForBundleLoad(rt: rt, name: "test", timeout: .seconds(5))
-        let bundleStorage = rt.bundleStorage
-        let bundleResult = try #require(bundleStorage["test"], "Expected bundle storage entry for 'test'")
-        guard case .success = bundleResult else {
-            Issue.record("Expected bundle 'test' to be .success, got \(bundleResult)")
+        let status = try #require(rt.activeBundles()["test"], "Expected bundle storage entry for 'test'")
+        guard status.bundle != nil else {
+            Issue.record("Expected bundle 'test' to be loaded, got \(status)")
             return
         }
 

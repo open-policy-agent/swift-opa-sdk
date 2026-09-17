@@ -111,17 +111,8 @@ extension OPA {
             var configProvider: (any OPA.ConfigProvider)?
 
             // --- Bundles ---
-            /// Storage for loaded bundles (both successful and failed).
-            var bundleStorage: [String: Result<OPA.Bundle, any Swift.Error>] = [:]
-            /// Monotonic counter incremented on every bundle change.
-            /// Used to detect interleaved updates during async preparation.
-            var bundleGeneration: UInt64 = 0
-            /// Cache of successful bundles, derived from `bundleStorage`.
-            /// Rebuilt lazily when `bundleGeneration` advances past
-            /// `cachedBundlesGeneration`.
-            var cachedBundles: [String: OPA.Bundle] = [:]
-            /// Sentinel `.max` forces the first read to populate the cache.
-            var cachedBundlesGeneration: UInt64 = .max
+            /// The source of truth for active bundle state.
+            var bundleStore = OPA.BundleStore()
 
             // --- Queries / Prepared queries ---
             /// Set of "always on" queries that will be automatically prepared
@@ -155,27 +146,21 @@ extension OPA {
             state.withLock { $0.latestConfig }
         }
 
-        /// Snapshot of the bundle storage, including failed loads.
-        public var bundleStorage: [String: Result<OPA.Bundle, any Swift.Error>] {
-            state.withLock { $0.bundleStorage }
+        /// Snapshot of the currently-active (enforced) bundles.
+        public var bundles: [String: OPA.Bundle] {
+            state.withLock { $0.bundleStore.bundles }
         }
 
-        /// Snapshot of successfully-loaded bundles.
-        public var bundles: [String: OPA.Bundle] {
-            state.withLock { state in
-                if state.cachedBundlesGeneration != state.bundleGeneration {
-                    var result: [String: OPA.Bundle] = [:]
-                    result.reserveCapacity(state.bundleStorage.count)
-                    for (name, storage) in state.bundleStorage {
-                        if case .success(let bundle) = storage {
-                            result[name] = bundle
-                        }
-                    }
-                    state.cachedBundles = result
-                    state.cachedBundlesGeneration = state.bundleGeneration
-                }
-                return state.cachedBundles
-            }
+        /// Snapshot of every configured bundle's status paired with its live
+        /// bundle payload.
+        public func activeBundles() -> [String: OPA.BundleStatus] {
+            state.withLock { $0.bundleStore.activeBundles() }
+        }
+
+        /// Cheaper metadata-only snapshot (no bundle payloads copied), modeled on
+        /// OPA's Status API `"bundles"` section.
+        public func activeBundleMetadata() -> [String: OPA.BundleStatusMetadata] {
+            state.withLock { $0.bundleStore.activeBundleMetadata() }
         }
 
         /// Snapshot of the registered query set.
@@ -368,20 +353,9 @@ extension OPA.Runtime {
                 state.queryGeneration &+= 1
             }
 
-            // Refresh the cached bundle map if it's behind.
-            if state.cachedBundlesGeneration != state.bundleGeneration {
-                var result: [String: OPA.Bundle] = [:]
-                result.reserveCapacity(state.bundleStorage.count)
-                for (name, storage) in state.bundleStorage {
-                    if case .success(let bundle) = storage {
-                        result[name] = bundle
-                    }
-                }
-                state.cachedBundles = result
-                state.cachedBundlesGeneration = state.bundleGeneration
-            }
-            let bundles = state.cachedBundles
-            let bundleGen = state.bundleGeneration
+            // Snapshot the active bundle set + generation consistently.
+            let bundles = state.bundleStore.bundles
+            let bundleGen = state.bundleStore.generation
 
             let sameBundleGen = bundleGen == state.preparedBundleGeneration
             let sameQueryGen = state.queryGeneration == state.preparedQueryGeneration
@@ -464,7 +438,7 @@ extension OPA.Runtime {
     /// cache is stale relative to the current bundle/query generations.
     private func cachedPreparedQuery(for query: String) -> OPA.Engine.PreparedQuery? {
         return state.withLock { state in
-            guard state.bundleGeneration == state.preparedBundleGeneration,
+            guard state.bundleStore.generation == state.preparedBundleGeneration,
                 state.queryGeneration == state.preparedQueryGeneration
             else { return nil }
             return state.preparedQueries[query]
@@ -579,12 +553,7 @@ extension OPA.Runtime {
             // starting/stopping only the delta so persistent loaders keep their
             // ETag + last-known-good bundle across config changes.
             let bundleSink: OPA.BundleUpdateSink = { name, update in
-                switch update {
-                case .loaded(let bundle):
-                    self.updateBundleResult(name: name, result: .success(bundle))
-                case .failed(let error):
-                    self.updateBundleResult(name: name, result: .failure(error))
-                }
+                self.applyBundleUpdate(name: name, update: update)
             }
             let manager = OPA.BundleManager(
                 factory: self.loaderFactory,
@@ -671,49 +640,36 @@ extension OPA.Runtime {
         return try factory.makeLoader(name: name, config: config)
     }
 
-    /// Applies a single bundle result to the runtime's bundle state and
-    /// bumps the bundle generation counter.
+    /// Applies a single bundle poll outcome to the bundle store.
     ///
     /// Called from bundle polling loops after an off-lock fetch completes.
-    /// The critical section is short — only synchronous dictionary updates.
-    private func updateBundleResult(
-        name: String,
-        result: Result<OPA.Bundle, any Swift.Error>
-    ) {
-        state.withLock { state in
-            // Deduplicate — skip if the result hasn't meaningfully changed.
-            switch (state.bundleStorage[name], result) {
-            case (.success(let old), .success(let new))
-            where old == new:
-                self.logger.debug("Bundle \(name) not modified.")
-                return
-            case (.failure(let old), .failure(let new))
-            where String(describing: old) == String(describing: new):
-                self.logger.debug("Bundle \(name) still failed to load with error: \(new).")
-                return
-            default:
-                self.logger.debug("Updating bundle \(name).")
-                break
-            }
-            state.bundleStorage[name] = result
-            state.bundleGeneration &+= 1
+    private func applyBundleUpdate(name: String, update: OPA.BundleUpdate) {
+        let now = Date()
+        let activated = state.withLock { state in
+            state.bundleStore.update(name: name, update, now: now)
+        }
+        switch update {
+        case .downloaded:
+            self.logger.debug(
+                activated ? "Activated new bundle \(name)." : "Bundle \(name) re-downloaded, unchanged.")
+        case .notModified:
+            self.logger.debug("Bundle \(name) not modified.")
+        case .failed(let error):
+            self.logger.debug(
+                "Bundle \(name) poll failed: \(error). Keeping last-known-good bundle, if any.")
         }
     }
 
-    /// Removes the named bundles from storage and bumps the bundle generation
-    /// if anything was removed. Called by the ``BundleManager`` when a bundle
-    /// entry is dropped from the config, so its last-known result does not
-    /// linger. The critical section is short — only synchronous dictionary work.
+    /// Removes the named bundles from the store when a bundle entry is dropped
+    /// from the config, so its last-known state does not linger. Bumps the store
+    /// generation only when a live entry was actually removed.
     private func pruneBundles(_ names: Set<String>) {
-        state.withLock { state in
-            var changed = false
-            for name in names where state.bundleStorage.removeValue(forKey: name) != nil {
-                changed = true
-                self.logger.debug("Pruning removed bundle \(name).")
-            }
-            if changed {
-                state.bundleGeneration &+= 1
-            }
+        let removed = state.withLock { state in
+            state.bundleStore.remove(names)
+        }
+        if removed {
+            self.logger.debug(
+                "Pruned removed bundle(s): \(names.sorted().joined(separator: ", ")).")
         }
     }
 }

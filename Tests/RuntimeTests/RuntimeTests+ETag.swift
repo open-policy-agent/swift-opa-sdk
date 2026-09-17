@@ -15,9 +15,8 @@ struct RuntimeETagIntegrationTests {
             try await withRunningRuntime(server: server, configJSON: configJSON) { rt in
                 try await Task.sleep(for: .seconds(3))
 
-                let latestStorage = rt.bundleStorage
-                guard case .success = latestStorage["test"] else {
-                    Issue.record("Bundle 'test' should still be .success after polling")
+                guard rt.activeBundles()["test"]?.bundle != nil else {
+                    Issue.record("Bundle 'test' should still be loaded after polling")
                     return
                 }
 
@@ -136,8 +135,8 @@ struct RESTClientLongPollingStateTransitionTests {
             )
 
             let firstResult = await loader.load()
-            guard case .success(let originalBundle) = firstResult else {
-                Issue.record("Expected .success on first load, got \(firstResult)")
+            guard case .downloaded = firstResult else {
+                Issue.record("Expected .downloaded on first load, got \(firstResult)")
                 return
             }
             #expect(loader.etag == "\"combo-v1\"")
@@ -146,11 +145,11 @@ struct RESTClientLongPollingStateTransitionTests {
             let secondResult = await loader.load()
             server.state.forceStatusCode = nil
 
-            guard case .success(let cachedBundle) = secondResult else {
-                Issue.record("Expected .success on 304 during long-polling, got \(secondResult)")
+            guard case .notModified(let etag) = secondResult else {
+                Issue.record("Expected .notModified on 304 during long-polling, got \(secondResult)")
                 return
             }
-            #expect(cachedBundle == originalBundle)
+            #expect(etag == "\"combo-v1\"")
 
             let req2Prefer = server.state.requests[1].headerValue(for: "prefer") ?? ""
             #expect(
@@ -288,7 +287,7 @@ func withBundleServer(
     }
 }
 
-private func withRunningRuntime(
+func withRunningRuntime(
     server: TestBundleServer,
     configJSON: String,
     bundleName: String = "test",
@@ -302,9 +301,9 @@ private func withRunningRuntime(
 
     let _ = await waitForBundleLoad(rt: rt, name: bundleName, timeout: .seconds(5))
 
-    let storage = rt.bundleStorage
-    guard case .success = storage[bundleName] else {
-        Issue.record("Expected bundle '\(bundleName)' to be .success, got \(String(describing: storage[bundleName]))")
+    guard rt.activeBundles()[bundleName]?.bundle != nil else {
+        Issue.record(
+            "Expected bundle '\(bundleName)' to be loaded, got \(String(describing: rt.activeBundles()[bundleName]))")
         return
     }
 

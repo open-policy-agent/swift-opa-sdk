@@ -33,22 +33,10 @@ struct RESTClientStructuredErrorTests {
         }
     }
 
-    @Test("304 without a cached bundle exposes httpStatus 304 and host")
-    func test304ExposesStatus() async throws {
-        let server = try await TestBundleServer.start(
-            bundleData: Data(), etag: "\"orphan\"", forceStatusCode: 304
-        )
-        defer { Task { try? await server.shutdown() } }
-
-        var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
-
-        let error = try requireBundleLoadFailure(await loader.load())
-        let fetchError = try #require(error as? BundleFetchError)
-
-        #expect(fetchError.httpStatus == 304)
-        #expect(fetchError.host == expectedHost)
-        #expect(fetchError.code == .bundleLoadError)
-    }
+    // A forced 304 on a fresh loader now reports `.notModified` (the loader no
+    // longer caches bundles or synthesizes a 304 error); the "304 with nothing
+    // active" case is handled by `BundleStore` and covered in BundleStoreTests /
+    // RESTClientBundleLoaderTests+ETag.
 
     // A transport failure (network, DNS, TLS) can't be exercised over a real
     // socket without risking a hang: the loader's non-long-polling path uses a

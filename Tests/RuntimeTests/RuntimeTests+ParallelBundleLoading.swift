@@ -157,7 +157,7 @@ struct ParallelBundleLoadingTests {
     ) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
-            let count = runtime.bundleStorage.count
+            let count = runtime.activeBundles().count
             if count >= expectedCount { return }
             try await Task.sleep(for: .milliseconds(100))
         }
@@ -246,31 +246,29 @@ struct ParallelBundleLoadingTests {
         expectedFailureNames: Set<String>
     ) async throws {
         let totalExpected = expectedSuccessNames.count + expectedFailureNames.count
-        let storage = rt.bundleStorage
+        let statuses = rt.activeBundles()
 
         #expect(
-            storage.count == totalExpected,
-            "Expected \(totalExpected) bundle result(s), got \(storage.count)")
+            statuses.count == totalExpected,
+            "Expected \(totalExpected) bundle result(s), got \(statuses.count)")
 
         for name in expectedSuccessNames {
-            if let result = storage[name] {
-                guard case .success = result else {
-                    Issue.record("Expected bundle '\(name)' to succeed, got \(result)")
-                    continue
+            if let status = statuses[name] {
+                if status.bundle == nil {
+                    Issue.record("Expected bundle '\(name)' to succeed, got \(status)")
                 }
             } else {
-                Issue.record("Expected '\(name)' key in bundleStorage")
+                Issue.record("Expected '\(name)' key in activeBundles")
             }
         }
 
         for name in expectedFailureNames {
-            if let result = storage[name] {
-                guard case .failure = result else {
-                    Issue.record("Expected bundle '\(name)' to fail, got \(result)")
-                    continue
+            if let status = statuses[name] {
+                if status.bundle != nil {
+                    Issue.record("Expected bundle '\(name)' to fail, got \(status)")
                 }
             } else {
-                Issue.record("Expected '\(name)' key in bundleStorage")
+                Issue.record("Expected '\(name)' key in activeBundles")
             }
         }
 
