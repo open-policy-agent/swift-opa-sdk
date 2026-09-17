@@ -107,8 +107,11 @@ extension OPA {
         }
 
         /// Loads a bundle from disk, returning either a successfully parsed
-        /// OPA bundle, or an error.
-        public func load() async -> Result<Bundle, any Swift.Error> {
+        /// OPA bundle, or an error. Disk sources never report `.notModified`
+        /// (no conditional-request semantics), so a successful read is always
+        /// `.downloaded`. Directory loads report a `nil` size (no single
+        /// on-disk byte count). Tarball loads report the file size.
+        public func load() async -> OPA.BundleUpdate {
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: self.fetchURL.path, isDirectory: &isDirectory) {
                 if isDirectory.boolValue {
@@ -119,7 +122,7 @@ extension OPA {
                             throw OPA.Bundle.LoadError.unsupported("Directory was empty")
                         }
                     } catch {
-                        return .failure(
+                        return .failed(
                             RuntimeError(
                                 code: .bundleLoadError,
                                 message:
@@ -130,9 +133,9 @@ extension OPA {
                     // Directory not empty.
                     do {
                         let bundle = try Bundle.decodeFromDirectory(fromDir: self.fetchURL)
-                        return .success(bundle)
+                        return .downloaded(bundle, etag: nil, size: nil)
                     } catch {
-                        return .failure(
+                        return .failed(
                             RuntimeError(
                                 code: .bundleLoadError,
                                 message: "bundle \(name) failed to load from directory: \(error)",
@@ -143,9 +146,9 @@ extension OPA {
                     do {
                         let bundleData = try Data(contentsOf: self.fetchURL)
                         let bundle = try Bundle.decodeFromTarball(from: bundleData)
-                        return .success(bundle)
+                        return .downloaded(bundle, etag: nil, size: bundleData.count)
                     } catch {
-                        return .failure(
+                        return .failed(
                             RuntimeError(
                                 code: .bundleLoadError,
                                 message: "bundle \(name) failed to load from tarball: \(error)",
@@ -154,7 +157,7 @@ extension OPA {
                     }
                 }
             }
-            return .failure(
+            return .failed(
                 RuntimeError(
                     code: .bundleTransportError,
                     message:

@@ -78,8 +78,8 @@ struct RuntimeDiscoveryETagTests {
 
         let active = runtime.activeConfig
         #expect(active.bundles.isEmpty, "no bundles when discovery fails")
-        let storage = runtime.bundleStorage
-        #expect(storage.isEmpty, "no loaders on discovery failure")
+        let statuses = runtime.activeBundles()
+        #expect(statuses.isEmpty, "no loaders on discovery failure")
     }
 
     @Test("Discovery succeeds, but one regular bundle endpoint 404s")
@@ -182,8 +182,8 @@ struct RuntimeDiscoveryLongPollingTests {
             try await waitForRequests(
                 server, prefix: "/discovery", atLeast: tc.minDiscoveryRequests, timeout: .seconds(30)
             )
-            let storage = runtime.bundleStorage
-            #expect(storage.isEmpty, "no bundles expected; got \(storage.keys)")
+            let statuses = runtime.activeBundles()
+            #expect(statuses.isEmpty, "no bundles expected; got \(statuses.keys)")
         }
 
         try await waitForRequests(server, prefix: "/discovery", atLeast: tc.minDiscoveryRequests)
@@ -454,7 +454,7 @@ func waitForBundleCount(
     _ runtime: OPA.Runtime, atLeast n: Int, timeout: Duration = .seconds(15)
 ) async throws {
     try await waitForCondition("bundle count >= \(n)", timeout: timeout) {
-        runtime.bundleStorage.count >= n
+        runtime.activeBundles().count >= n
     }
 }
 
@@ -470,9 +470,17 @@ func waitForRequests(
 // MARK: - Storage assertion helpers
 
 extension OPA.Runtime {
-    /// Snapshots current bundleStorage for concise assertions in tests.
+    /// Snapshots the active bundle set as success/failure results for concise
+    /// assertions in tests.
     func storageSnapshot() async -> [String: Result<OPA.Bundle, Error>] {
-        return bundleStorage
+        activeBundles().mapValues { status in
+            if let bundle = status.bundle { return .success(bundle) }
+            return .failure(
+                BundleFetchError(
+                    code: .bundleLoadError,
+                    message: status.metadata.message ?? "bundle \(status.metadata.name) not loaded",
+                    httpStatus: status.metadata.httpCode))
+        }
     }
 }
 

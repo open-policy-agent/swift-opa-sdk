@@ -36,16 +36,26 @@ private struct ReconcilerMockLoader: OPA.BundleLoader {
         ReconcilerLoaderStats.recordInit(name: bundleResourceName)
     }
 
-    mutating func load() async -> Result<OPA.Bundle, any Swift.Error> {
+    mutating func load() async -> OPA.BundleUpdate {
         if !emitted {
             emitted = true
-            return .success(bundle)
+            return .downloaded(bundle, etag: nil, size: nil)
         }
         while !Task.isCancelled { await Task.yield() }
-        return .success(bundle)
+        return .downloaded(bundle, etag: nil, size: nil)
     }
 
     static func compatibleWithConfig(config: OPA.Config, bundleResourceName: String) -> Bool { true }
+}
+
+/// A loader compatible with nothing, so ``OPA/BundleLoaderFactory`` throws when
+/// asked to build it — exercising the failed-construction path.
+private struct NeverCompatibleLoader: OPA.BundleLoader {
+    init(config: OPA.Config, bundleResourceName: String, logger: Logger?) throws {}
+    func load() async -> OPA.BundleUpdate {
+        .failed(RuntimeError(code: .internalError, message: "never constructed"))
+    }
+    static func compatibleWithConfig(config: OPA.Config, bundleResourceName: String) -> Bool { false }
 }
 
 // MARK: - Helpers
@@ -139,6 +149,36 @@ struct BundleManagerTests {
         await manager.apply(config: try makeConfig(bundles: [a: "/r"]))
         #expect(removed.withLock { $0 } == [b])
         #expect(ReconcilerLoaderStats.count(a) == 1)  // a not rebuilt
+
+        await manager.shutdown()
+    }
+
+    @Test("a bundle whose loader fails to construct is pruned when it leaves the config")
+    func failedConstructionEntryPruned() async throws {
+        let id = UUID().uuidString.prefix(8)
+        let x = "x-\(id)"
+        let failed = Mutex<Set<String>>([])
+        let removed = Mutex<Set<String>>([])
+        let factory = OPA.BundleLoaderFactory(
+            loaderTypes: [NeverCompatibleLoader.self], logger: Logger(label: "test"))
+        let manager = OPA.BundleManager(
+            factory: factory,
+            httpClientCache: nil,
+            sink: { name, update in
+                if case .failed = update { failed.withLock { $0.insert(name) } }
+            },
+            onRemoved: { names in removed.withLock { $0.formUnion(names) } },
+            logger: Logger(label: "test"))
+
+        // No compatible loader → construction fails → reported as `.failed` and
+        // never entered `running`.
+        await manager.apply(config: try makeConfig(bundles: [x: "/r"]))
+        #expect(failed.withLock { $0 } == [x])
+        #expect(removed.withLock { $0 }.isEmpty)
+
+        // Dropping x must still fire onRemoved so its stale status entry is pruned.
+        await manager.apply(config: try makeConfig(bundles: [:]))
+        #expect(removed.withLock { $0 } == [x])
 
         await manager.shutdown()
     }

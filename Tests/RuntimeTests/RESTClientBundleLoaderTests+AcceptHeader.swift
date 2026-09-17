@@ -160,12 +160,16 @@ struct RESTClientAcceptHeaderTests {
         try await withBundleServer(etag: "\"v1\"") { server in
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
-            let firstBundle = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
+            let _ = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
             #expect(loader.etag == "\"v1\"")
 
-            // Server replies 304 because If-None-Match matches its ETag.
-            let secondBundle = try requireBundleLoadSuccess(await loader.load(), context: "on second (304) load")
-            #expect(firstBundle == secondBundle)
+            // Server replies 304 because If-None-Match matches its ETag; the
+            // loader reports .notModified (it no longer returns a cached bundle).
+            let second = await loader.load()
+            guard case .notModified = second else {
+                Issue.record("Expected .notModified on the second (304) load, got \(second)")
+                return
+            }
 
             let requests = server.state.requests
             #expect(requests.count == 2)
@@ -192,7 +196,13 @@ struct RESTClientAcceptHeaderTests {
             let _ = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
             #expect(loader.isLongPollingEnabled())
 
-            let _ = try requireBundleLoadSuccess(await loader.load(), context: "on second (long-poll) load")
+            // The If-None-Match on the second request matches, so the server
+            // replies 304 and the loader reports .notModified.
+            let second = await loader.load()
+            guard case .notModified = second else {
+                Issue.record("Expected .notModified on the second (long-poll) load, got \(second)")
+                return
+            }
 
             let requests = server.state.requests
             #expect(requests.count == 2)

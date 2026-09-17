@@ -550,8 +550,8 @@ extension OPA {
 
         // MARK: BundleLoader conformance
 
-        func load() async -> Result<OPA.Bundle, any Error> {
-            .failure(
+        func load() async -> OPA.BundleUpdate {
+            .failed(
                 RuntimeError(
                     code: .internalError,
                     message: "RecordingHTTPBundleLoader does not fetch bundles"))

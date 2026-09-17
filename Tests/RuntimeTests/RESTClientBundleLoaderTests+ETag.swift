@@ -50,17 +50,21 @@ struct RESTClientETagTests {
         }
     }
 
-    @Test("Cached bundle is returned when server responds 304")
-    func testCachedBundleReturnedOn304() async throws {
+    @Test("304 returns .notModified and preserves the loader's ETag")
+    func testNotModifiedReturnedOn304() async throws {
         try await withBundleServer(etag: "\"rev-1\"") { server in
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
-            let firstBundle = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
+            let _ = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
             server.state.forceStatusCode = 304
-            let secondBundle = try requireBundleLoadSuccess(await loader.load(), context: "on second (304) load")
+            let secondResult = await loader.load()
             server.state.forceStatusCode = nil
 
-            #expect(firstBundle == secondBundle)
+            guard case .notModified(let etag) = secondResult else {
+                Issue.record("Expected .notModified on 304, got \(secondResult)")
+                return
+            }
+            #expect(etag == "\"rev-1\"")
         }
     }
 
@@ -108,24 +112,28 @@ struct RESTClientETagTests {
         }
     }
 
-    @Test("Multiple sequential 304s return the same cached bundle each time")
-    func testMultiple304sReturnSameBundle() async throws {
+    @Test("Multiple sequential 304s each return .notModified")
+    func testMultiple304sReturnNotModified() async throws {
         try await withBundleServer(etag: "\"stable\"") { server in
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
-            let originalBundle = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
+            let _ = try requireBundleLoadSuccess(await loader.load(), context: "on first load")
             server.state.forceStatusCode = 304
             for i in 1...3 {
-                let cachedBundle = try requireBundleLoadSuccess(await loader.load(), context: "on 304 round \(i)")
-                #expect(cachedBundle == originalBundle, "Round \(i): cached bundle should match original")
+                let result = await loader.load()
+                guard case .notModified(let etag) = result else {
+                    Issue.record("Round \(i): expected .notModified, got \(result)")
+                    return
+                }
+                #expect(etag == "\"stable\"", "Round \(i): etag should be preserved")
             }
         }
     }
 
     // MARK: Invalid / Failure Cases
 
-    @Test("304 without a previously cached bundle produces a failure")
-    func test304WithoutCachedBundleFails() async throws {
+    @Test("304 on a fresh loader returns .notModified")
+    func test304OnFreshLoaderReturnsNotModified() async throws {
         let server = try await TestBundleServer.start(
             bundleData: Data(), etag: "\"orphan\"", forceStatusCode: 304
         )
@@ -133,48 +141,46 @@ struct RESTClientETagTests {
 
         var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
+        // The loader no longer caches bundles or distinguishes a 304 without a
+        // prior success; it simply reports .notModified. The runtime's
+        // BundleStore records the "304 with nothing active" case as an error.
         let result = await loader.load()
-        guard case .failure(let error) = result else {
-            Issue.record("Expected .failure when 304 arrives with no cached bundle, got \(result)")
+        guard case .notModified = result else {
+            Issue.record("Expected .notModified on a forced 304, got \(result)")
             return
         }
-
-        #expect(
-            String(describing: error).contains("304"),
-            "Error should mention the 304 status code"
-        )
     }
 
-    @Test("304 after a failed first load produces a failure")
-    func test304AfterPreviousFailureStillFails() async throws {
+    @Test("500 then 304: first fails, then reports .notModified")
+    func test500ThenNotModified() async throws {
         try await withBundleServer(etag: "\"v1\"") { server in
             server.state.forceStatusCode = 500
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
             let firstResult = await loader.load()
-            guard case .failure = firstResult else {
-                Issue.record("Expected .failure on first load (server returned 500)")
+            guard case .failed = firstResult else {
+                Issue.record("Expected .failed on first load (server returned 500), got \(firstResult)")
                 return
             }
 
             server.state.forceStatusCode = 304
             let secondResult = await loader.load()
-            guard case .failure = secondResult else {
-                Issue.record("Expected .failure on 304 with no cached bundle, got \(secondResult)")
+            guard case .notModified = secondResult else {
+                Issue.record("Expected .notModified on 304, got \(secondResult)")
                 return
             }
         }
     }
 
-    @Test("Recovery after 304-without-cache: subsequent 200 succeeds")
-    func testRecoveryAfter304Failure() async throws {
+    @Test("Recovery after a forced 304: subsequent 200 succeeds")
+    func testRecoveryAfter304() async throws {
         try await withBundleServer(etag: "\"v1\"") { server in
             server.state.forceStatusCode = 304
             var loader = try makeRESTClientBundleLoader(configJSON: makeETagTestConfig(baseURL: server.baseURL))
 
             let firstResult = await loader.load()
-            guard case .failure = firstResult else {
-                Issue.record("Expected .failure on forced 304")
+            guard case .notModified = firstResult else {
+                Issue.record("Expected .notModified on forced 304, got \(firstResult)")
                 return
             }
 

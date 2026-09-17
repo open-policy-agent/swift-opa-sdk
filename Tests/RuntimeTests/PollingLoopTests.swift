@@ -39,15 +39,18 @@ private struct ScriptedBundleLoader: OPA.HTTPBundleLoader {
         self.longPolling = false
     }
 
-    mutating func load() async -> Result<OPA.Bundle, any Swift.Error> {
+    mutating func load() async -> OPA.BundleUpdate {
         if index < script.count {
             let step = script[index]
             index += 1
-            return step.mapError { $0 as any Swift.Error }
+            switch step {
+            case .success(let bundle): return .downloaded(bundle, etag: nil, size: nil)
+            case .failure(let error): return .failed(error)
+            }
         }
         // Script exhausted: park until cancelled so the loop stops emitting.
         while !Task.isCancelled { await Task.yield() }
-        return .failure(LoopTestError(tag: "exhausted"))
+        return .failed(LoopTestError(tag: "exhausted"))
     }
 
     func isLongPollingEnabled() -> Bool { longPolling }
@@ -153,8 +156,8 @@ struct PollingLoopTests {
         let updates = await collectBundleUpdates(count: 3, loader: loader)
 
         #expect(updates.count == 3)
-        guard case .loaded(let first) = updates[0] else {
-            Issue.record("expected .loaded, got \(updates[0])")
+        guard case .downloaded(let first, _, _) = updates[0] else {
+            Issue.record("expected .downloaded, got \(updates[0])")
             return
         }
         #expect(first == b1)
@@ -162,8 +165,8 @@ struct PollingLoopTests {
             Issue.record("expected .failed, got \(updates[1])")
             return
         }
-        guard case .loaded(let third) = updates[2] else {
-            Issue.record("expected .loaded, got \(updates[2])")
+        guard case .downloaded(let third, _, _) = updates[2] else {
+            Issue.record("expected .downloaded, got \(updates[2])")
             return
         }
         #expect(third == b2)

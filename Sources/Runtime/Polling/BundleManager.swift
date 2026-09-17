@@ -44,6 +44,10 @@ extension OPA {
         private let onRemoved: (@Sendable (Set<String>) -> Void)?
         private let logger: Logger
         private let running = Mutex<[String: Running]>([:])
+        /// Bundle names present in the last applied config. Tracked so a name
+        /// that leaves the config is pruned even if its loader never entered
+        /// `running` (e.g. its construction failed).
+        private let configuredNames = Mutex<Set<String>>([])
 
         public init(
             factory: OPA.BundleLoaderFactory,
@@ -110,9 +114,14 @@ extension OPA {
                 for name in toStop.keys { running.removeValue(forKey: name) }
             }
 
-            // Prune storage for entries that were removed entirely (not merely
-            // changed), so stale bundles don't linger.
-            let removedNames = Set(toStop.keys).filter { desired[$0] == nil }
+            // Prune storage for entries that left the config entirely (not merely
+            // changed), so stale status does not linger — including for a bundle
+            // whose loader failed to construct and so never entered `running`.
+            let removedNames = configuredNames.withLock { previous -> Set<String> in
+                let removed = previous.subtracting(desired.keys)
+                previous = Set(desired.keys)
+                return removed
+            }
             if !removedNames.isEmpty, let onRemoved {
                 onRemoved(removedNames)
             }
